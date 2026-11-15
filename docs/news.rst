@@ -21,6 +21,15 @@ Removed
 
 - Drop support for end-of-life Python version 3.9.
 
+Fixed
+~~~~~
+
+- Fix accepted jobs being silently lost after they are dequeued from a persistent spider queue but
+  before their crawl process starts. A dequeued job is now recovered as pending on the next start if
+  its process never started, recorded as finished if its process failed to start, and never re-scraped
+  once its process started. The launcher slot is also released, instead of leaked, when a process fails
+  to start.
+
 1.6.0 (2025-07-22)
 ------------------
 

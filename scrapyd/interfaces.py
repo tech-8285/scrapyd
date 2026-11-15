@@ -104,6 +104,16 @@ class ISpiderQueue(Interface):
         Pop the next pending job. The pending job is a ``dict`` containing the spider ``name``. Depending on the
         implementation, other keys might include the ``_job`` ID, egg ``_version`` and Scrapy ``settings``, with
         keyword arguments that are not recognized by the receiver being treated as spider arguments.
+
+        The pending job might include a ``_settle`` callable, for implementations that keep a recovery record
+        of popped jobs. The receiver must call it once the job is tracked elsewhere (for example, as a running
+        process or as a finished job), so that the implementation can discard the recovery record. If the
+        receiver never calls it (for example, because the service stops first), the job becomes pending again
+        on the next initialization. The ``_settle`` key is internal, and must not be passed to the spider as
+        an argument.
+
+        .. versionchanged:: 1.7.0
+           Add the optional ``_settle`` callable to the pending job.
         """
 
     def list():

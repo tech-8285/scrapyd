@@ -48,6 +48,13 @@ def test_schedule(scheduler):
     scheduler.schedule("mybot2", "myspider2", 1, c="d")
     scheduler.schedule("mybot2", "myspider3", 10, e="f")
 
-    assert mybot1_queue.pop() == {"name": "myspider1", "a": "b"}
-    assert mybot2_queue.pop() == {"name": "myspider3", "e": "f"}
-    assert mybot2_queue.pop() == {"name": "myspider2", "c": "d"}
+    # The "_settle" recovery handle (see scrapyd.interfaces.ISpiderQueue.pop) is not part of the job.
+    messages = [mybot1_queue.pop(), mybot2_queue.pop(), mybot2_queue.pop()]
+    settles = [message.pop("_settle") for message in messages]
+
+    assert all(callable(settle) for settle in settles)
+    assert messages == [
+        {"name": "myspider1", "a": "b"},
+        {"name": "myspider3", "e": "f"},
+        {"name": "myspider2", "c": "d"},
+    ]

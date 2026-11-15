@@ -102,6 +102,51 @@ def test_jsonsqlitepriorityqueue_remove(jsonsqlitepriorityqueue):
     assert list(jsonsqlitepriorityqueue) == [(msg1, 0.0), (msg3, 0.0)]
 
 
+def test_jsonsqlitepriorityqueue_pop_inflight_empty(jsonsqlitepriorityqueue):
+    assert jsonsqlitepriorityqueue.pop_inflight() is None
+
+
+def test_jsonsqlitepriorityqueue_pop_inflight_settle(tmp_path):
+    database = str(tmp_path / "queue.db")
+    queue = JsonSqlitePriorityQueue(database)
+    queue.put("a message", priority=3.0)
+
+    token, message = queue.pop_inflight()
+
+    assert message == "a message"
+    assert len(queue) == 0
+
+    queue.settle(token)
+
+    # A new connection (for example, after a restart) does not recover the settled message.
+    recovered = JsonSqlitePriorityQueue(database)
+
+    assert len(recovered) == 0
+    assert recovered.pop_inflight() is None
+
+
+def test_jsonsqlitepriorityqueue_pop_inflight_recover(tmp_path):
+    database = str(tmp_path / "queue.db")
+    queue = JsonSqlitePriorityQueue(database)
+    queue.put("a message", priority=3.0)
+
+    token, message = queue.pop_inflight()
+
+    assert message == "a message"
+    assert len(queue) == 0
+
+    # A new connection (for example, after a restart) recovers the unsettled message, with its priority.
+    recovered = JsonSqlitePriorityQueue(database)
+
+    assert len(recovered) == 1
+    assert list(recovered) == [("a message", 3.0)]
+
+    token, message = recovered.pop_inflight()
+
+    assert isinstance(token, int)
+    assert message == "a message"
+
+
 @pytest.mark.parametrize(
     "value",
     [

@@ -2,12 +2,13 @@ import datetime
 import re
 
 import pytest
-from twisted.internet import defer, error
+from twisted.internet import defer, error, reactor
 from twisted.logger import LogLevel, capturedLogs
 from twisted.python import failure
 
 from scrapyd import __version__
 from scrapyd.config import Config
+from scrapyd.interfaces import IPoller
 from scrapyd.launcher import Launcher, get_crawl_args
 from tests import get_message, has_settings
 
@@ -37,6 +38,8 @@ def process(launcher):
             {"_project": "p1", "_spider": "s1", "arg1": "val1", "settings": {"ONE": "two"}},
             ["s1", "-s", "ONE=two", "-a", "arg1=val1"],
         ),
+        # The "_settle" recovery handle is not a spider argument.
+        ({"_project": "p1", "_spider": "s1", "_settle": lambda: None}, ["s1"]),
     ],
 )
 def test_get_crawl_args(message, expected):
@@ -102,6 +105,52 @@ def test_spawn_process(launcher, message, expected):
         assert process.env["SCRAPY_SETTINGS_MODULE"] == "localproject.settings"
     else:
         assert "SCRAPY_SETTINGS_MODULE" not in process.env
+
+
+def test_spawn_process_settles_message(launcher):
+    settled = []
+    launcher._spawn_process(  # noqa: SLF001
+        {"_project": "p1", "_spider": "s1", "_job": "j1", "_settle": lambda: settled.append(True)}, 0
+    )
+
+    assert launcher.processes[0].job == "j1"
+    assert settled == [True]
+
+
+def test_spawn_process_failure(launcher, monkeypatch):
+    def spawn_process(*args, **kwargs):
+        raise OSError("No such file or directory")
+
+    monkeypatch.setattr(reactor, "spawnProcess", spawn_process)
+
+    settled = []
+    message = {"_project": "p1", "_spider": "s1", "_job": "j1", "_settle": lambda: settled.append(True)}
+
+    with capturedLogs() as captured:
+        launcher._spawn_process(message, 0)  # noqa: SLF001
+    captured = remove_debug_messages(captured)
+
+    # The failure is logged.
+    assert len(captured) == 1
+    assert captured[0]["log_level"] == LogLevel.error
+    assert re.search(
+        r"\[Launcher\] Process failed to start: No such file or directory "
+        r"project='p1' spider='s1' job='j1'",
+        get_message(captured),
+    )
+
+    # The job is not lost: it's in an explicit terminal state, and the queue's recovery record is settled.
+    assert 0 not in launcher.processes
+    assert settled == [True]
+    assert len(launcher.finished) == 1
+    finished = next(iter(launcher.finished))
+    assert (finished.project, finished.spider, finished.job) == ("p1", "s1", "j1")
+    assert isinstance(finished.start_time, datetime.datetime)
+    assert isinstance(finished.end_time, datetime.datetime)
+
+    # The slot is released: the launcher is waiting for another message for it.
+    poller = launcher.app.getComponent(IPoller)
+    assert len(poller.dq.waiting) == 1
 
 
 def test_out_received(process):

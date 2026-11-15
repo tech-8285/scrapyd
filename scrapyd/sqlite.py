@@ -57,6 +57,9 @@ class JsonSqlitePriorityQueue(SqliteMixin):
     SQLite priority queue. It relies on SQLite concurrency support for providing atomic inter-process operations.
 
     .. versionadded:: 1.0.0
+    .. versionchanged:: 1.7.0
+       Add :meth:`pop_inflight`, :meth:`settle` and :meth:`recover`, so that a popped message is not lost
+       if the process stops before the message is handled.
     """
 
     def __init__(self, database=None, table="queue"):
@@ -65,6 +68,56 @@ class JsonSqlitePriorityQueue(SqliteMixin):
         self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS {table} (id integer PRIMARY KEY, priority real key, message blob)"
         )
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {table}_inflight (id integer PRIMARY KEY, priority real key, message blob)"
+        )
+        self.recover()
+
+    def pop_inflight(self):
+        """
+        Move the next message to the in-flight table, and return a ``(token, message)`` tuple, or ``None``
+        if the queue is empty.
+
+        The message stays in the in-flight table until :meth:`settle` is called with the token. If the
+        process stops first, the message is moved back to the queue by :meth:`recover`.
+        """
+        row = self.conn.execute(
+            f"SELECT id, priority, message FROM {self.table} ORDER BY priority DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        _id, priority, message = row
+
+        # If a row vanished, try again.
+        if not self.conn.execute(f"DELETE FROM {self.table} WHERE id = ?", (_id,)).rowcount:
+            self.conn.rollback()
+            return self.pop_inflight()
+
+        token = self.conn.execute(
+            f"INSERT INTO {self.table}_inflight (priority, message) VALUES (?, ?)", (priority, message)
+        ).lastrowid
+        self.conn.commit()
+        return token, self.decode(message)
+
+    def settle(self, token):
+        """
+        Discard the in-flight message with this ``token``, which is now tracked elsewhere.
+        """
+        self.conn.execute(f"DELETE FROM {self.table}_inflight WHERE id = ?", (token,))
+        self.conn.commit()
+
+    def recover(self):
+        """
+        Move in-flight messages back to the queue.
+
+        Called at initialization, so that messages that were popped but never settled (for example,
+        because the process stopped) become available again.
+        """
+        self.conn.execute(
+            f"INSERT INTO {self.table} (priority, message) SELECT priority, message FROM {self.table}_inflight"
+        )
+        self.conn.execute(f"DELETE FROM {self.table}_inflight")
+        self.conn.commit()
 
     def put(self, message, priority=0.0):
         self.conn.execute(

@@ -1,3 +1,5 @@
+import functools
+
 from zope.interface import implementer
 
 from scrapyd import sqlite
@@ -15,7 +17,15 @@ class SqliteSpiderQueue:
         self.q.put(message, priority=priority)
 
     def pop(self):
-        return self.q.pop()
+        result = self.q.pop_inflight()
+        if result is None:
+            return None
+        token, message = result
+        # The receiver settles the message once the job is tracked elsewhere (a running process or a
+        # terminal state). If the service stops first, the job becomes pending again on the next
+        # initialization. See scrapyd.interfaces.ISpiderQueue.pop.
+        message["_settle"] = functools.partial(self.q.settle, token)
+        return message
 
     def count(self):
         return len(self.q)

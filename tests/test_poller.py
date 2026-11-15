@@ -64,6 +64,13 @@ def test_poll_next(poller):
     assert hasattr(deferred2, "result")
     assert getattr(deferred2, "called", False)
 
+    # The recovery handle (see scrapyd.interfaces.ISpiderQueue.pop) is not part of the job identity.
+    settle1 = deferred1.result.pop("_settle")
+    settle2 = deferred2.result.pop("_settle")
+
+    assert callable(settle1)
+    assert callable(settle2)
+
     # os.listdir() in FilesystemEggStorage.list_projects() uses an arbitrary order.
     project_a = deferred1.result["_project"]
     spider_a = scenario.pop(project_a)
@@ -71,6 +78,9 @@ def test_poll_next(poller):
 
     assert deferred1.result["_spider"] == spider_a
     assert deferred2.result == {"_project": project_b, "_spider": spider_b}
+
+    settle1()
+    settle2()
 
 
 def test_poll_empty(poller):

@@ -8,7 +8,6 @@ from twisted.internet import defer, error, protocol, reactor
 from twisted.logger import Logger
 
 from scrapyd import __version__
-from scrapyd.exceptions import LauncherError
 from scrapyd.interfaces import IEnvironment, IJobStorage, IPoller
 
 log = Logger()
@@ -20,6 +19,8 @@ def get_crawl_args(message):
     """
     copied = message.copy()
     del copied["_project"]
+    # The "_settle" recovery handle (see scrapyd.interfaces.ISpiderQueue.pop) is not a spider argument.
+    copied.pop("_settle", None)
 
     return [
         copied.pop("_spider"),
@@ -55,24 +56,55 @@ class Launcher(Service):
         log.debug("Process slot {slot} ready", slot=slot)
 
     def _spawn_process(self, message, slot):
-        project = message["_project"]
-        environment = self.app.getComponent(IEnvironment)
-        message.setdefault("settings", {})
-        message["settings"].update(environment.get_settings(message))
-
-        env = environment.get_environment(message, slot)
-        args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
-
-        process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
-        process.deferred.addBoth(self._process_finished, slot)
+        # A message from a queue with recovery support (see scrapyd.interfaces.ISpiderQueue.pop) carries a
+        # "_settle" callable, which tells the queue that the job is now tracked elsewhere: as a running
+        # process (below) or as a finished job (on failure). If the service stops before the message is
+        # settled, the queue makes the job pending again on its next initialization, so that the job is
+        # never lost. The callable is not a spider argument, so it's removed from the message first.
+        settle = message.pop("_settle", None)
 
         try:
+            project = message["_project"]
+            environment = self.app.getComponent(IEnvironment)
+            message.setdefault("settings", {})
+            message["settings"].update(environment.get_settings(message))
+
+            env = environment.get_environment(message, slot)
+            args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
+
+            process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
+            process.deferred.addBoth(self._process_finished, slot)
+
             reactor.spawnProcess(process, sys.executable, args=args, env=env)
-        except OSError as e:
-            raise LauncherError(f"{e}: args={args!r}") from e
+        except Exception as e:  # noqa: BLE001 an accepted job must not be lost, whatever the failure
+            # The process never started. Record the job as finished (an explicit terminal state), settle
+            # the queue's recovery record and free the slot for another message, instead of losing the
+            # job and leaking the slot.
+            self._spawn_failed(message, slot, settle, e)
+            return
 
         self.processes[slot] = process
+        if settle is not None:
+            settle()
         log.debug("Process slot {slot} occupied", slot=slot)
+
+    def _spawn_failed(self, message, slot, settle, exception):
+        log.error(
+            "Process failed to start: {error} project={project!r} spider={spider!r} job={job!r}",
+            error=exception,
+            project=message.get("_project"),
+            spider=message.get("_spider"),
+            job=message.get("_job"),
+            log_system="Launcher",
+        )
+        process = ScrapyProcessProtocol(
+            message.get("_project"), message.get("_spider"), message.get("_job"), env={}, args=[]
+        )
+        process.end_time = datetime.datetime.now()
+        self.finished.add(process)
+        if settle is not None:
+            settle()
+        self._get_message(slot)
 
     def _process_finished(self, _, slot):
         process = self.processes.pop(slot)

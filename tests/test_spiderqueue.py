@@ -32,9 +32,47 @@ def test_pop(spiderqueue):
 
     assert (yield maybeDeferred(spiderqueue.count)) == 3
 
-    assert (yield maybeDeferred(spiderqueue.pop)) == expected
+    message = yield maybeDeferred(spiderqueue.pop)
+    settle = message.pop("_settle")
 
+    assert callable(settle)
+    assert message == expected
     assert (yield maybeDeferred(spiderqueue.count)) == 2
+
+    yield maybeDeferred(settle)
+
+
+@inlineCallbacks
+def test_pop_recover_unsettled(tmp_path):
+    config = Config(values={"dbs_dir": str(tmp_path / "dbs")})
+    queue = SqliteSpiderQueue(config, "mybot")
+    yield maybeDeferred(queue.add, "spider1", 10, **spider_args)
+
+    message = yield maybeDeferred(queue.pop)
+
+    assert callable(message["_settle"])
+    assert (yield maybeDeferred(queue.count)) == 0
+
+    # A new instance (for example, after a restart) recovers the unsettled job as pending.
+    recovered = SqliteSpiderQueue(config, "mybot")
+
+    assert (yield maybeDeferred(recovered.count)) == 1
+    assert (yield maybeDeferred(recovered.list)) == [expected]
+
+
+@inlineCallbacks
+def test_pop_settled_not_recovered(tmp_path):
+    config = Config(values={"dbs_dir": str(tmp_path / "dbs")})
+    queue = SqliteSpiderQueue(config, "mybot")
+    yield maybeDeferred(queue.add, "spider1", 10, **spider_args)
+
+    message = yield maybeDeferred(queue.pop)
+    yield maybeDeferred(message["_settle"])
+
+    # A new instance (for example, after a restart) does not recover the settled job.
+    recovered = SqliteSpiderQueue(config, "mybot")
+
+    assert (yield maybeDeferred(recovered.count)) == 0
 
 
 @inlineCallbacks
