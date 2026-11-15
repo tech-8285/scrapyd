@@ -72,3 +72,49 @@ def test_clear(spiderqueue):
     yield maybeDeferred(spiderqueue.clear)
 
     assert (yield maybeDeferred(spiderqueue.count)) == 0
+
+
+@inlineCallbacks
+def test_add_same_job_in_place(spiderqueue):
+    yield maybeDeferred(spiderqueue.add, "spider1", 0, _job="j1", arg1="old")
+    yield maybeDeferred(spiderqueue.add, "spider2", 0, _job="j2")
+
+    # Repeating a schedule request must not dispatch the same job twice.
+    yield maybeDeferred(spiderqueue.add, "spider1", 2, _job="j1", arg1="new")
+
+    assert (yield maybeDeferred(spiderqueue.count)) == 2
+    # The higher priority is applied, but the job keeps the position it was first given.
+    assert (yield maybeDeferred(spiderqueue.list)) == [
+        {"name": "spider1", "_job": "j1", "arg1": "new"},
+        {"name": "spider2", "_job": "j2"},
+    ]
+    priority, _ = yield maybeDeferred(spiderqueue.head)
+    assert priority == 2
+
+
+@inlineCallbacks
+def test_add_without_job(spiderqueue):
+    yield maybeDeferred(spiderqueue.add, "spider1")
+    yield maybeDeferred(spiderqueue.add, "spider1")
+
+    # Without a job ID, the queue can't know whether the two messages are the same job.
+    assert (yield maybeDeferred(spiderqueue.count)) == 2
+
+
+@inlineCallbacks
+def test_head(spiderqueue):
+    assert (yield maybeDeferred(spiderqueue.head)) is None
+
+    yield maybeDeferred(spiderqueue.add, "spider0", 5)
+    yield maybeDeferred(spiderqueue.add, "spider1", 10, **spider_args)
+
+    priority, accepted_at = yield maybeDeferred(spiderqueue.head)
+
+    assert priority == 10
+    assert (yield maybeDeferred(spiderqueue.pop)) == expected
+
+    # The head is not removed, and it is the job that pop() returns.
+    priority, next_accepted_at = yield maybeDeferred(spiderqueue.head)
+    assert priority == 5
+    assert next_accepted_at < accepted_at
+    assert (yield maybeDeferred(spiderqueue.count)) == 1

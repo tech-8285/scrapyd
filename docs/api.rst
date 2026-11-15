@@ -88,8 +88,17 @@ Parameters
     the project version (the latest project version by default)
   ``jobid``
     the job's ID (a hexadecimal UUID v1 by default)
+
+    If the ``jobid`` matches a *pending* job of the same project, that job is updated in place with the given
+    ``priority``, ``_version``, ``setting`` and spider arguments, and it keeps the position that it received when it
+    was first scheduled. If the ``jobid`` matches a *running* job, an error is returned. Reusing the ``jobid`` of a
+    *finished* job schedules a new crawl.
   ``priority``
     the job's priority in the project's spider queue (0 by default, higher number, higher priority)
+
+    Jobs are started in descending priority order, such that a higher-priority job starts before a lower-priority job.
+    Jobs with the same priority are started in the order in which they were first scheduled, including across projects
+    that share the same process slots, and including after Scrapyd restarts.
   ``setting``
     a Scrapy setting
 
@@ -119,6 +128,13 @@ Example:
 
    $ curl http://localhost:6800/schedule.json -d project=myproject -d spider=somespider
    {"node_name": "mynodename", "status": "ok", "jobid": "6487ec79947edab326d6db28a2d86511e8247444"}
+
+Example of scheduling a job with a job ID that is already running:
+
+.. code-block:: shell-session
+
+   $ curl http://localhost:6800/schedule.json -d project=myproject -d spider=somespider -d jobid=6487ec79947edab326d6db28a2d86511e8247444
+   {"node_name": "mynodename", "status": "error", "message": "job '6487ec79947edab326d6db28a2d86511e8247444' is already running"}
 
 .. _status.json:
 

@@ -1,4 +1,5 @@
 import datetime
+import sqlite3
 
 import pytest
 
@@ -118,6 +119,178 @@ def test_jsonsqlitepriorityqueue_types(jsonsqlitepriorityqueue, value):
     jsonsqlitepriorityqueue.put(value)
 
     assert jsonsqlitepriorityqueue.pop() == value
+
+
+def test_jsonsqlitepriorityqueue_equal_priority_fifo(jsonsqlitepriorityqueue):
+    messages = [{"name": "spider", "_job": f"j{i}"} for i in range(5)]
+    for message in messages:
+        jsonsqlitepriorityqueue.put(message)
+
+    assert [jsonsqlitepriorityqueue.pop() for _ in messages] == messages
+
+
+def test_jsonsqlitepriorityqueue_equal_priority_fifo_after_reopen(tmp_path):
+    database = str(tmp_path / "queue.db")
+    messages = [{"name": "spider", "_job": f"j{i}"} for i in range(5)]
+
+    queue = JsonSqlitePriorityQueue(database)
+    for message in messages:
+        queue.put(message)
+
+    # An ordering that isn't persisted would be at the mercy of the query plan, or of the insertion IDs of a rewritten
+    # table. Re-open the database, like a restart would.
+    queue = JsonSqlitePriorityQueue(database)
+
+    assert list(queue) == [(message, 0.0) for message in messages]
+    assert [queue.pop() for _ in messages] == messages
+
+
+def test_jsonsqlitepriorityqueue_priority_is_global_and_stable(jsonsqlitepriorityqueue):
+    messages = [{"name": "spider", "_job": f"j{i}"} for i in range(6)]
+    for message, priority in zip(messages, [0, 5, 0, 5, 5, 0], strict=True):
+        jsonsqlitepriorityqueue.put(message, priority=priority)
+
+    # Descending priority, then ascending acceptance time.
+    assert [message["_job"] for message, _ in jsonsqlitepriorityqueue] == ["j1", "j3", "j4", "j0", "j2", "j5"]
+
+
+def test_jsonsqlitepriorityqueue_put_pending_job_in_place(jsonsqlitepriorityqueue):
+    jsonsqlitepriorityqueue.put({"name": "spider1", "_job": "j1"})
+    jsonsqlitepriorityqueue.put({"name": "spider2", "_job": "j2"})
+    jsonsqlitepriorityqueue.put({"name": "spider3", "_job": "j3"})
+
+    # Repeating the request updates the pending job, and it keeps the position that it was first given.
+    jsonsqlitepriorityqueue.put({"name": "spider1", "_job": "j1", "arg": "new"})
+
+    assert len(jsonsqlitepriorityqueue) == 3
+    assert [message["_job"] for message, _ in jsonsqlitepriorityqueue] == ["j1", "j2", "j3"]
+    assert jsonsqlitepriorityqueue.pop() == {"name": "spider1", "_job": "j1", "arg": "new"}
+
+    # A new priority moves the job, but it keeps its acceptance time among peers of the new priority.
+    jsonsqlitepriorityqueue.put({"name": "spider3", "_job": "j3"}, priority=5.0)
+    jsonsqlitepriorityqueue.put({"name": "spider4", "_job": "j4"}, priority=5.0)
+
+    assert [message["_job"] for message, _ in jsonsqlitepriorityqueue] == ["j3", "j4", "j2"]
+
+
+def test_jsonsqlitepriorityqueue_put_in_place_after_reopen(tmp_path):
+    database = str(tmp_path / "queue.db")
+    queue = JsonSqlitePriorityQueue(database)
+    queue.put({"name": "spider", "_job": "j1"})
+    queue.put({"name": "spider", "_job": "j2"})
+
+    queue = JsonSqlitePriorityQueue(database)
+    queue.put({"name": "spider", "_job": "j1"}, priority=5.0)
+
+    assert [message["_job"] for message, _ in queue] == ["j1", "j2"]
+    assert [queue.pop()["_job"], queue.pop()["_job"]] == ["j1", "j2"]
+
+
+def test_jsonsqlitepriorityqueue_put_same_job_twice_dispatches_once(jsonsqlitepriorityqueue):
+    message = {"name": "spider", "_job": "j1"}
+    jsonsqlitepriorityqueue.put(message)
+    jsonsqlitepriorityqueue.put(message)
+
+    assert len(jsonsqlitepriorityqueue) == 1
+    assert jsonsqlitepriorityqueue.pop() == message
+    assert jsonsqlitepriorityqueue.pop() is None
+
+
+def test_jsonsqlitepriorityqueue_put_after_pop(jsonsqlitepriorityqueue):
+    message = {"name": "spider", "_job": "j1"}
+    jsonsqlitepriorityqueue.put(message)
+    assert jsonsqlitepriorityqueue.pop() == message
+
+    # A job that is no longer pending can be scheduled again.
+    jsonsqlitepriorityqueue.put(message)
+    assert len(jsonsqlitepriorityqueue) == 1
+    assert jsonsqlitepriorityqueue.pop() == message
+
+
+@pytest.mark.parametrize("message", [{"name": "spider"}, {"name": "spider", "_job": None}, "no job id"])
+def test_jsonsqlitepriorityqueue_put_without_job_id(jsonsqlitepriorityqueue, message):
+    jsonsqlitepriorityqueue.put(message)
+    jsonsqlitepriorityqueue.put(message)
+
+    # Without a job ID, the queue can't know whether two messages are the same job.
+    assert len(jsonsqlitepriorityqueue) == 2
+
+
+def test_jsonsqlitepriorityqueue_head(jsonsqlitepriorityqueue):
+    assert jsonsqlitepriorityqueue.head() is None
+
+    jsonsqlitepriorityqueue.put({"name": "spider", "_job": "j1"})
+    jsonsqlitepriorityqueue.put({"name": "spider", "_job": "j2"}, priority=5.0)
+
+    priority, accepted_at = jsonsqlitepriorityqueue.head()
+
+    assert priority == 5.0
+    # The head is not removed.
+    assert len(jsonsqlitepriorityqueue) == 2
+    # The head is the job that pop() returns.
+    assert jsonsqlitepriorityqueue.pop() == {"name": "spider", "_job": "j2"}
+    # The next head is the job that was accepted first.
+    priority, next_accepted_at = jsonsqlitepriorityqueue.head()
+    assert priority == 0.0
+    assert next_accepted_at < accepted_at
+
+
+def test_jsonsqlitepriorityqueue_list_matches_pop_order(jsonsqlitepriorityqueue):
+    messages = [{"name": "spider", "_job": f"j{i}"} for i in range(4)]
+    for message, priority in zip(messages, [0, 3, 3, 0], strict=True):
+        jsonsqlitepriorityqueue.put(message, priority=priority)
+
+    listed = [message for message, _ in jsonsqlitepriorityqueue]
+    popped = [jsonsqlitepriorityqueue.pop() for _ in messages]
+
+    assert listed == popped
+
+
+def test_jsonsqlitepriorityqueue_migrate_legacy_table(tmp_path):
+    database = str(tmp_path / "queue.db")
+
+    # Create the table as an older version of Scrapyd created it, including a duplicated pending job.
+    conn = sqlite3.connect(database)
+    conn.execute("CREATE TABLE spider_queue (id integer PRIMARY KEY, priority real key, message blob)")
+    legacy = [
+        (0.0, '{"name": "spider1", "_job": "j1"}'),
+        (0.0, '{"name": "spider2", "_job": "j2"}'),
+        (0.0, '{"name": "spider1", "_job": "j1"}'),
+        (5.0, '{"name": "spider3", "_job": "j3"}'),
+    ]
+    for priority, message in legacy:
+        conn.execute(
+            "INSERT INTO spider_queue (priority, message) VALUES (?, ?)",
+            (priority, sqlite3.Binary(message.encode("ascii"))),
+        )
+    conn.commit()
+    conn.close()
+
+    queue = JsonSqlitePriorityQueue(database, "spider_queue")
+
+    # The duplicated pending job is collapsed to its first occurrence, and the legacy insertion order is kept.
+    assert [message["_job"] for message, _ in queue] == ["j3", "j1", "j2"]
+    assert [queue.pop()["_job"], queue.pop()["_job"], queue.pop()["_job"]] == ["j3", "j1", "j2"]
+    assert queue.pop() is None
+
+    # The migration is idempotent, and the new job can't be added twice.
+    queue = JsonSqlitePriorityQueue(database, "spider_queue")
+    queue.put({"name": "spider4", "_job": "j4"})
+    queue.put({"name": "spider4", "_job": "j4"})
+
+    assert len(queue) == 1
+
+
+def test_jsonsqlitepriorityqueue_migrate_twice(tmp_path):
+    database = str(tmp_path / "queue.db")
+
+    queue = JsonSqlitePriorityQueue(database)
+    queue.put({"name": "spider", "_job": "j1"})
+
+    # A second instance must not disturb the existing rows.
+    queue = JsonSqlitePriorityQueue(database)
+
+    assert [message["_job"] for message, _ in queue] == ["j1"]
 
 
 def test_sqlitefinishedjobs_add(sqlitefinishedjobs):

@@ -10,11 +10,22 @@ Added
 ~~~~~
 
 - Add DEBUG-level messages to the :ref:`schedule.json` and :ref:`cancel.json` webservices.
+- Add a ``head`` method to the :py:interface:`~scrapyd.interfaces.ISpiderQueue` interface.
+- Add an ``order`` method to the :py:interface:`~scrapyd.interfaces.ISpiderQueue` interface.
 
 Changed
 ~~~~~~~
 
 - Clarify error message when the launcher fails to spawn processes.
+- Order pending jobs with equal :ref:`priority<schedule.json>` by the time at which they were first scheduled, and
+  persist that order, so that the order is reproduced after Scrapyd restarts. See the :ref:`spiderqueue` and
+  :ref:`poller` settings.
+- Start pending jobs in the order of their priority and acceptance time across all projects, instead of one project
+  after another, so that a project with a large backlog cannot starve equal-priority jobs in other projects.
+- List the pending jobs in the :ref:`listjobs.json` webservice response in the order in which they will be started.
+- Scheduling the ``jobid`` of a pending job updates that job in place, instead of adding a second pending job.
+- The :ref:`schedule.json` webservice returns an error for the ``jobid`` of a running job, instead of scheduling a
+  second crawl that would overwrite the running job's log and items files.
 
 Removed
 ~~~~~~~

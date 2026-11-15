@@ -161,6 +161,11 @@ Also used by
   -  :ref:`daemonstatus.json` webservice, to count the pending jobs
   -  :ref:`webui`, to list the pending jobs and, if queues are transient, to create the queues per project at startup
 
+Pending jobs are ordered by descending :ref:`priority<schedule.json>`, then by ascending acceptance time. The
+acceptance time of a job is stored in the queue, so that the order of equal-priority jobs is reproduced after Scrapyd
+restarts. Scheduling the ``jobid`` of a pending job updates it in place, keeping the acceptance time that it received
+when it was first scheduled.
+
 .. Community PostgreSQL and RabbitMQ queues: https://github.com/scrapy/scrapyd/pull/140/files#diff-c479470812a00776da54c3cefc15bb5bb244b4056996ae972f4daba7f6ec5bd5
 
 Poller options
@@ -182,6 +187,10 @@ Options
 
     -  The launcher adds :ref:`max_proc` capacity at startup, and one capacity each time a Scrapy process ends.
     -  The :ref:`application` starts a timer so that, every :ref:`poll_interval` seconds, jobs start if there's capacity: that is, if the number of Scrapy processes that are running is less than the :ref:`max_proc` value.
+
+    Jobs in all projects are considered together: the job with the highest :ref:`priority<schedule.json>` starts first,
+    and equal-priority jobs start in the order in which they were first scheduled. A project with a large backlog
+    therefore does not prevent jobs of other projects from starting.
 
   -  Implement your own, using the :py:interface:`~scrapyd.interfaces.IPoller` interface
 

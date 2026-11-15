@@ -401,6 +401,26 @@ def test_list_jobs_nonexistent(txrequest, root):
     assert_error(txrequest, root, "GET", "listjobs", args, b"project 'nonexistent' not found")
 
 
+def test_list_jobs_pending_order(txrequest, root):
+    root_add_version(root, "p1", "r1", "mybot")
+    root_add_version(root, "p2", "r2", "mybot2")
+    root.update_projects()
+
+    # Accept jobs across projects in an interleaved order, and with mixed priorities.
+    root.poller.queues["p1"].add("s1", _job="j1", priority=0)
+    root.poller.queues["p2"].add("s2", _job="j2", priority=0)
+    root.poller.queues["p1"].add("s3", _job="j3", priority=5)
+    root.poller.queues["p2"].add("s4", _job="j4", priority=0)
+
+    txrequest.args = {}
+    txrequest.method = "GET"
+    pending = json.loads(root.children[b"listjobs.json"].render(txrequest))["pending"]
+
+    # The pending jobs are listed in the order in which the poller will start them: descending priority, then
+    # acceptance order, across projects.
+    assert [job["id"] for job in pending] == ["j3", "j1", "j2", "j4"]
+
+
 def test_delete_version(txrequest, root):
     projects = get_local_projects(root)
 
@@ -649,6 +669,47 @@ def test_schedule_parameters(txrequest, root_with_egg):
     }
 
 
+def test_schedule_pending_job_in_place(txrequest, root_with_egg):
+    args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"aaa"]}
+    txrequest.method = "POST"
+
+    txrequest.args = {**args, b"priority": [b"1"], b"arg1": [b"old"]}
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+    assert json.loads(content)["status"] == "ok"
+
+    txrequest.args = {**args, b"priority": [b"9"], b"arg1": [b"new"]}
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+    assert json.loads(content)["status"] == "ok"
+
+    jobs = root_with_egg.poller.queues["mybot"].list()
+
+    # The pending job is updated in place, instead of a second pending job being added.
+    assert jobs == [{"name": "spider1", "_job": "aaa", "arg1": "new", "settings": {}}]
+    assert root_with_egg.poller.queues["mybot"].head()[0] == 9
+
+
+def test_schedule_running_job(txrequest, root_with_egg):
+    root_with_egg.launcher.processes[0] = ScrapyProcessProtocol("mybot", "spider1", "j1", env={}, args=[])
+
+    args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"j1"]}
+    assert_error(txrequest, root_with_egg, "POST", "schedule", args, b"job 'j1' is already running")
+
+    assert root_with_egg.poller.queues["mybot"].count() == 0
+
+
+def test_schedule_finished_job(txrequest, root_with_egg):
+    root_with_egg.launcher.finished.add(get_finished_job(project="mybot", spider="spider1", job="j1"))
+
+    args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"j1"]}
+    txrequest.args = args.copy()
+    txrequest.method = "POST"
+    data = json.loads(root_with_egg.children[b"schedule.json"].render(txrequest))
+
+    # Re-running a finished job stays allowed.
+    assert data["status"] == "ok"
+    assert data["jobid"] == "j1"
+
+
 # Like test_list_spiders_nonexistent.
 @pytest.mark.parametrize(
     ("args", "param", "run_only_if_has_settings"),
@@ -687,7 +748,8 @@ def test_cancel(txrequest, root, scrapy_process, args):
     root.poller.queues["p1"].add("s1", _job="j1")
     root.poller.queues["p1"].add("s1", _job="j2")
 
-    assert root.poller.queues["p1"].count() == 3
+    # Adding the same job ID twice updates the pending job in place, instead of adding a second pending job.
+    assert root.poller.queues["p1"].count() == 2
     expected["prevstate"] = "pending"
     assert_content(txrequest, root, "POST", "cancel", args, expected)
     assert root.poller.queues["p1"].count() == 1

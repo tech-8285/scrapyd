@@ -17,6 +17,12 @@ class SqliteSpiderQueue:
     def pop(self):
         return self.q.pop()
 
+    def head(self):
+        return self.q.head()
+
+    def order(self):
+        return self.q.order()
+
     def count(self):
         return len(self.q)
 

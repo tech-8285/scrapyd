@@ -56,6 +56,13 @@ class IPoller(Interface):
     def poll():
         """
         Called periodically to start jobs if there's capacity.
+
+        Jobs in all projects are ordered by descending priority, then by ascending acceptance time, and the method
+        starts jobs in that order. A project with a large backlog must not starve equal-priority jobs in other projects
+        that share the same capacity.
+
+        .. versionchanged:: 1.7.0
+           Order jobs across projects by priority and acceptance time, instead of by project.
         """
 
     def next():
@@ -95,8 +102,18 @@ class ISpiderQueue(Interface):
         ``_job`` ID, egg ``_version`` and Scrapy ``settings`` depending on the implementation, with keyword arguments
         that are not recognized by the implementation being treated as spider arguments.
 
+        Pending jobs are ordered by descending ``priority``, then by ascending acceptance time, so that the order of
+        equal-priority jobs can be reproduced after a restart. Acceptance time is the time at which the job was first
+        added, and it must survive a restart.
+
+        If a job with the same ``_job`` ID is already pending, update it in place instead of adding a second pending
+        job. The job keeps the acceptance time that it received when it was first added, so that repeating a request
+        does not let the job jump ahead of equal-priority jobs that were accepted earlier.
+
         .. versionchanged:: 1.3.0
            Add the ``priority`` parameter.
+        .. versionchanged:: 1.7.0
+           Update a pending job in place if the ``_job`` ID is already pending.
         """
 
     def pop():
@@ -104,11 +121,24 @@ class ISpiderQueue(Interface):
         Pop the next pending job. The pending job is a ``dict`` containing the spider ``name``. Depending on the
         implementation, other keys might include the ``_job`` ID, egg ``_version`` and Scrapy ``settings``, with
         keyword arguments that are not recognized by the receiver being treated as spider arguments.
+
+        Pop the job that was added with the highest ``priority``. Among equal-priority jobs, pop the job that was added
+        first.
+        """
+
+    def head():
+        """
+        Return the priority and acceptance time of the job that :meth:`pop` would return, as a ``(priority,
+        accepted_at)`` tuple, without removing the job. The acceptance times of two jobs must be comparable with each
+        other. Return None if the queue is empty.
+
+        .. versionadded:: 1.7.0
+           Used by the default :ref:`poller` to choose between projects without removing jobs from their queues.
         """
 
     def list():
         """
-        Return the pending jobs.
+        Return the pending jobs, in the order in which :meth:`pop` would return them.
 
         .. seealso:: :meth:`scrapyd.interfaces.ISpiderQueue.pop`
         """
@@ -138,8 +168,13 @@ class ISpiderScheduler(Interface):
         """
         Schedule a crawl.
 
+        Scheduling the ``_job`` ID of a pending job updates that job in place. See
+        :meth:`scrapyd.interfaces.ISpiderQueue.add`.
+
         .. versionchanged:: 1.3.0
            Add the ``priority`` parameter.
+        .. versionchanged:: 1.7.0
+           Update a pending job in place if its ``_job`` ID is scheduled again.
         """
 
     def list_projects():

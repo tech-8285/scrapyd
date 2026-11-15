@@ -187,6 +187,8 @@ class Schedule(WsResource):
        Add ``_version`` and ``jobid`` parameters.
     .. versionchanged:: 1.3.0
        Add ``priority`` parameter.
+    .. versionchanged:: 1.7.0
+       Reject the ``jobid`` of a running job. Scheduling the ``jobid`` of a pending job updates that job in place.
     """
 
     @param("project")
@@ -202,6 +204,12 @@ class Schedule(WsResource):
 
         if version and self.root.eggstorage.get(project, version) == (None, None):
             raise error.Error(code=http.OK, message=b"version '%b' not found" % version.encode())
+
+        # A running job can't be re-scheduled: it would write the same log and items files as the running process.
+        # A pending job can be re-scheduled, because the queue updates it in place. See JsonSqlitePriorityQueue.put().
+        for process in self.root.launcher.processes.values():
+            if process.project == project and process.job == jobid:
+                raise error.Error(code=http.OK, message=b"job '%b' is already running" % jobid.encode())
 
         spiders = spider_list.get(project, version, runner=self.root.runner)
         if spider not in spiders:
@@ -359,6 +367,8 @@ class ListJobs(WsResource):
        Add ``log_url`` and ``items_url`` to finished jobs in the response.
     .. versionchanged:: 1.5.0
        Add ``version``, ``settings`` and ``args`` to pending jobs in the response.
+    .. versionchanged:: 1.7.0
+       List pending jobs in the order in which they will be started.
     """
 
     @param("project", required=False)
@@ -367,19 +377,21 @@ class ListJobs(WsResource):
         if project is not None and project not in queues:
             raise error.Error(code=http.OK, message=b"project '%b' not found" % project.encode())
 
+        queue_names = list(queues if project is None else [project])
+        pending = []
+        for queue_name in queue_names:
+            queue = queues[queue_name]
+            messages = queue.list()
+            keys = self._ordering_keys(queue, queue_name, len(messages))
+            pending.extend(
+                (key, self._pending_job(queue_name, message)) for key, message in zip(keys, messages, strict=True)
+            )
+        # The poller starts jobs across projects in priority and acceptance order. List them in the same order, so that
+        # the response describes the dispatch order rather than the order of the projects.
+        pending.sort(key=lambda pair: pair[0])
+
         return {
-            "pending": [
-                {
-                    "id": message["_job"],
-                    "project": queue_name,
-                    "spider": message["name"],
-                    "version": message.get("_version"),
-                    "settings": message.get("settings", {}),
-                    "args": {k: v for k, v in message.items() if k not in ("name", "_job", "_version", "settings")},
-                }
-                for queue_name in (queues if project is None else [project])
-                for message in queues[queue_name].list()
-            ],
+            "pending": [job for _, job in pending],
             "running": [
                 {
                     "id": process.job,
@@ -407,6 +419,29 @@ class ListJobs(WsResource):
                 if project is None or finished.project == project
             ],
         }
+
+    @staticmethod
+    def _pending_job(queue_name, message):
+        return {
+            "id": message["_job"],
+            "project": queue_name,
+            "spider": message["name"],
+            "version": message.get("_version"),
+            "settings": message.get("settings", {}),
+            "args": {k: v for k, v in message.items() if k not in ("name", "_job", "_version", "settings")},
+        }
+
+    @staticmethod
+    def _ordering_keys(queue, queue_name, count):
+        """Return the keys that sort the pending jobs into the order in which the poller will start them."""
+        try:
+            keys = queue.order()
+        except AttributeError:
+            keys = []
+        if len(keys) != count:
+            # A custom ISpiderQueue implementation without a consistent order method. Fall back to the project order.
+            return [(0.0, 0.0, queue_name, index) for index in range(count)]
+        return [(-priority, accepted_at, queue_name, index) for index, (priority, accepted_at) in enumerate(keys)]
 
 
 class DeleteProject(WsResource):
