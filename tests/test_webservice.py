@@ -215,7 +215,7 @@ def test_debug(txrequest, root):
 
 
 def test_daemonstatus(txrequest, root_with_egg, scrapy_process):
-    expected = {"running": 0, "pending": 0, "finished": 0}
+    expected = {"running": 0, "pending": 0, "launching": 0, "finished": 0}
     assert_content(txrequest, root_with_egg, "GET", "daemonstatus", {}, expected)
 
     root_with_egg.launcher.finished.add(job1)
@@ -320,6 +320,78 @@ def test_status(txrequest, root, scrapy_process, args):
     assert_content(txrequest, root, "GET", "status", {b"job": [b"j1"], **args}, expected)
 
 
+@pytest.mark.parametrize("state", ["launching", "running", "failed", "orphaned"])
+def test_status_reflects_launch_registry(txrequest, root, state):
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+    queue = root.poller.queues["p1"]
+    registry = root.registry
+    queue.add("s1", _job="j9")
+    registry.claim("p1", queue)
+    if state == "running":
+        registry.mark_running("p1", "j9", 1234)
+    elif state == "failed":
+        registry.fail("p1", "j9", "boom")
+    elif state == "orphaned":
+        registry.mark_running("p1", "j9", 1234)
+        registry.orphan("p1", "j9")
+
+    assert_content(
+        txrequest,
+        root,
+        "GET",
+        "status",
+        {b"job": [b"j9"]},
+        {"currstate": state},
+    )
+
+
+def test_list_jobs_includes_launching_and_failed(txrequest, root):
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+    registry = root.registry
+    queue = root.poller.queues["p1"]
+
+    queue.add("s1", _job="launching-job")
+    registry.claim("p1", queue)
+    queue.add("s1", _job="failed-job")
+    registry.claim("p1", queue)
+    registry.fail("p1", "failed-job", "cannot fork")
+
+    txrequest.args = {}
+    txrequest.method = "GET"
+    data = json.loads(root.children[b"listjobs.json"].render(txrequest))
+    data.pop("node_name")
+
+    launching_ids = [row["id"] for row in data["launching"]]
+    failed_ids = [row["id"] for row in data["failed"]]
+    assert "launching-job" in launching_ids
+    assert "failed-job" in failed_ids
+    failed_row = next(row for row in data["failed"] if row["id"] == "failed-job")
+    assert failed_row["state"] == "failed"
+    assert "cannot fork" in failed_row["error"]
+    assert data["running"] == []
+    assert data["finished"] == []
+
+
+def test_cancel_launching_job_terminalizes_it(txrequest, root):
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+    registry = root.registry
+    queue = root.poller.queues["p1"]
+    queue.add("s1", _job="j-cancel")
+    registry.claim("p1", queue)
+
+    txrequest.args = {b"project": [b"p1"], b"job": [b"j-cancel"]}
+    txrequest.method = "POST"
+    data = json.loads(root.children[b"cancel.json"].render(txrequest))
+    data.pop("node_name")
+
+    assert data["prevstate"] == "launching"
+    assert registry.get("p1", "j-cancel").state == "failed"
+    assert queue.count() == 0
+
+
 def test_status_nonexistent(txrequest, root):
     args = {b"job": [b"aaa"], b"project": [b"nonexistent"]}
     assert_error(txrequest, root, "GET", "status", args, b"project 'nonexistent' not found")
@@ -341,7 +413,7 @@ def test_list_jobs(txrequest, root, scrapy_process, args, exists, chdir):
         touch(chdir / "logs" / "p1" / "s1" / "j1.log")
         touch(chdir / "items" / "p1" / "s1" / "j1.jl")
 
-    expected = {"pending": [], "running": [], "finished": []}
+    expected = {"pending": [], "launching": [], "running": [], "failed": [], "finished": []}
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
 
     root.launcher.finished.add(job1)

@@ -6,6 +6,7 @@ from zope.interface.verify import verifyObject
 
 from scrapyd.config import Config
 from scrapyd.interfaces import IPoller
+from scrapyd.launchregistry import LAUNCHING, SqliteLaunchRegistry
 from scrapyd.poller import QueuePoller
 from scrapyd.utils import get_spider_queues
 
@@ -80,3 +81,39 @@ def test_poll_empty(poller):
     assert hasattr(value, "result")
     assert getattr(value, "called", False)
     assert value.result is None
+
+
+def test_poll_records_claimed_job_in_registry(tmpdir):
+    eggs_dir = Path(tmpdir) / "eggs"
+    dbs_dir = Path(tmpdir) / "dbs"
+    config = Config(values={"eggs_dir": str(eggs_dir), "dbs_dir": str(dbs_dir)})
+    (eggs_dir / "mybot1").mkdir(parents=True)
+    registry = SqliteLaunchRegistry(config)
+    poller = QueuePoller(config, registry)
+    poller.queues["mybot1"].add("spider1", _job="j1")
+
+    deferred = poller.next()
+    poller.poll()
+
+    message = deferred.result
+    assert message["_job"] == "j1"
+    # The job left the queue and is durably recorded as launching.
+    assert poller.queues["mybot1"].count() == 0
+    entry = registry.get("mybot1", "j1")
+    assert entry is not None
+    assert entry.state == LAUNCHING
+
+
+def test_poll_without_registry_keeps_historical_pop(tmpdir):
+    eggs_dir = Path(tmpdir) / "eggs"
+    dbs_dir = Path(tmpdir) / "dbs"
+    config = Config(values={"eggs_dir": str(eggs_dir), "dbs_dir": str(dbs_dir)})
+    (eggs_dir / "mybot1").mkdir(parents=True)
+    poller = QueuePoller(config)  # no registry: null fallback
+    poller.queues["mybot1"].add("spider1", _job="j1")
+
+    deferred = poller.next()
+    poller.poll()
+
+    assert deferred.result["_job"] == "j1"
+    assert poller.queues["mybot1"].count() == 0

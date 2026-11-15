@@ -176,6 +176,9 @@ class DaemonStatus(WsResource):
     def render_GET(self, txrequest):
         return {
             "pending": sum(queue.count() for queue in self.root.poller.queues.values()),
+            "launching": sum(
+                1 for entry in self.root.registry.active() if entry.state == "launching"
+            ),
             "running": len(self.root.launcher.processes),
             "finished": len(self.root.launcher.finished),
         }
@@ -249,6 +252,17 @@ class Cancel(WsResource):
 
         if self.root.poller.queues[project].remove(lambda message: message["_job"] == job):
             prevstate = "pending"
+
+        # A job can be dequeued but not yet running (it lives in the launch registry). Cancel its record explicitly so
+        # it is neither silently dropped nor started after the cancellation request.
+        entry = self.root.registry.get(project, job)
+        if entry is not None and entry.state in ("launching", "running"):
+            if entry.state == "launching":
+                self.root.registry.fail(project, job, "canceled before the crawl process started")
+                if prevstate is None:
+                    prevstate = "launching"
+            elif prevstate is None:
+                prevstate = "running"
 
         if signal.isdigit():
             signal = int(signal)
@@ -338,6 +352,12 @@ class Status(WsResource):
                 result["currstate"] = "running"
                 return result
 
+        # Launch registry states reflect whether a crawl process actually started.
+        for entry in self.root.registry.list():
+            if (project is None or entry.project == project) and entry.job == job:
+                result["currstate"] = entry.state
+                return result
+
         for queue_name in queues if project is None else [project]:
             for message in queues[queue_name].list():
                 if message["_job"] == job:
@@ -380,6 +400,19 @@ class ListJobs(WsResource):
                 for queue_name in (queues if project is None else [project])
                 for message in queues[queue_name].list()
             ],
+            # Jobs that left the spider queue but whose crawl process has not been confirmed to start. They are not
+            # pending (they are not in a queue) and not running (no crawl process exists yet).
+            "launching": [
+                {
+                    "id": entry.job,
+                    "project": entry.project,
+                    "spider": entry.spider,
+                    "state": entry.state,
+                    "start_time": str(entry.start_time) if entry.start_time is not None else None,
+                }
+                for entry in self.root.registry.active(project)
+                if entry.state == "launching"
+            ],
             "running": [
                 {
                     "id": process.job,
@@ -392,6 +425,21 @@ class ListJobs(WsResource):
                 }
                 for process in self.root.launcher.processes.values()
                 if project is None or process.project == project
+            ],
+            # Explicit terminal states for jobs whose process failed to start, or that started under a previous
+            # Scrapyd process and ended without reaching the finished-job storage.
+            "failed": [
+                {
+                    "id": entry.job,
+                    "project": entry.project,
+                    "spider": entry.spider,
+                    "state": entry.state,
+                    "error": entry.error,
+                    "start_time": str(entry.start_time) if entry.start_time is not None else None,
+                    "end_time": str(entry.end_time) if entry.end_time is not None else None,
+                }
+                for entry in self.root.registry.list()
+                if entry.state in ("failed", "orphaned") and (project is None or entry.project == project)
             ],
             "finished": [
                 {

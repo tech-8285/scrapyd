@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from scrapy.utils.misc import load_object
 from twisted.application.internet import TCPServer, TimerService, UNIXServer
 from twisted.application.service import Application
 from twisted.logger import Logger
@@ -8,7 +9,14 @@ from twisted.web import server
 
 from scrapyd.basicauth import wrap_resource
 from scrapyd.environ import Environment
-from scrapyd.interfaces import IEggStorage, IEnvironment, IJobStorage, IPoller, ISpiderScheduler
+from scrapyd.interfaces import (
+    IEggStorage,
+    IEnvironment,
+    IJobStorage,
+    ILaunchRegistry,
+    IPoller,
+    ISpiderScheduler,
+)
 from scrapyd.scheduler import SpiderScheduler
 from scrapyd.utils import initialize_component
 
@@ -24,14 +32,26 @@ def application(config):
 
     environment = Environment(config)
     scheduler = SpiderScheduler(config)
-    poller = initialize_component(config, "poller", "scrapyd.poller.QueuePoller")
     jobstorage = initialize_component(config, "jobstorage", "scrapyd.jobstorage.MemoryJobStorage")
+    # Persist the dequeued-but-not-started window whenever the jobs themselves are persisted. An in-memory deployment
+    # loses all state on restart anyway, so an in-memory registry suffices there. An explicit launchregistry setting
+    # always wins; an empty value selects the default based on the job storage.
+    registry_path = config.get("launchregistry", "")
+    if not registry_path:
+        registry_path = (
+            "scrapyd.launchregistry.SqliteLaunchRegistry"
+            if config.get("jobstorage", "scrapyd.jobstorage.MemoryJobStorage") != "scrapyd.jobstorage.MemoryJobStorage"
+            else "scrapyd.launchregistry.MemoryLaunchRegistry"
+        )
+    registry = load_object(registry_path)(config)
+    poller = initialize_component(config, "poller", "scrapyd.poller.QueuePoller", registry)
     eggstorage = initialize_component(config, "eggstorage", "scrapyd.eggstorage.FilesystemEggStorage")
 
     app.setComponent(IEnvironment, environment)
     app.setComponent(ISpiderScheduler, scheduler)
     app.setComponent(IPoller, poller)
     app.setComponent(IJobStorage, jobstorage)
+    app.setComponent(ILaunchRegistry, registry)
     app.setComponent(IEggStorage, eggstorage)
 
     # launcher uses jobstorage in initializer, and uses poller and environment.

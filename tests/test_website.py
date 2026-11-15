@@ -145,6 +145,27 @@ def test_jobs(txrequest, config, cancel, header, exists, chdir):
     assert b' value="j1-finished">' not in content
 
 
+def test_jobs_shows_launching_and_failed(txrequest, root):
+    root_add_version(root, "mybot", "0.1", "mybot")
+    root.update_projects()
+    registry = root.registry
+    queue = root.poller.queues["mybot"]
+
+    queue.add("mybot", _job="j-launching")
+    registry.claim("mybot", queue)
+    queue.add("mybot", _job="j-failed")
+    registry.claim("mybot", queue)
+    registry.fail("mybot", "j-failed", "cannot fork")
+
+    txrequest.method = "GET"
+    text = root.children[b"jobs"].render(txrequest).decode()
+
+    assert "j-launching" in text
+    assert "j-failed (failed)" in text
+    assert "Pending (queued and launching)" in text
+    assert "Finished (including failed and orphaned)" in text
+
+
 @pytest.mark.parametrize("with_egg", [True, False])
 @pytest.mark.parametrize("header", [True, False])
 def test_home(txrequest, root, with_egg, header):

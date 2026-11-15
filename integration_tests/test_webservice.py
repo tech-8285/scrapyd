@@ -72,7 +72,9 @@ def test_project_directory_traversal(method, basename, params):
 
 
 def test_daemonstatus():
-    assert_response("get", "/daemonstatus.json", {"status": "ok", "running": 0, "pending": 0, "finished": 0})
+    assert_response(
+        "get", "/daemonstatus.json", {"status": "ok", "running": 0, "pending": 0, "launching": 0, "finished": 0}
+    )
 
 
 def test_schedule_nonexistent_project():
@@ -141,7 +143,7 @@ def test_listjobs():
     assert_response(
         "get",
         "/listjobs.json",
-        {"status": "ok", "pending": [], "running": [], "finished": []},
+        {"status": "ok", "pending": [], "launching": [], "running": [], "failed": [], "finished": []},
     )
 
 

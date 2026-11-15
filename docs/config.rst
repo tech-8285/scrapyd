@@ -475,6 +475,27 @@ Default
 Options
   Any non-negative integer
 
+.. _launchregistry:
+
+launchregistry
+~~~~~~~~~~~~~~
+
+The class that records jobs between the moment they leave a spider queue and the moment their crawl process is known
+to have started (or to have failed to start). This prevents an accepted job from being silently lost, or run twice,
+when Scrapyd fails or is restarted in that window.
+
+On startup, never-started jobs are put back in their spider queue; jobs whose crawl process is still alive keep running
+and are not started again; processes that ended without reaching the job storage get an explicit ``orphaned`` state.
+
+Default
+  empty, which selects ``scrapyd.launchregistry.SqliteLaunchRegistry`` when :ref:`jobstorage` is a SQLite backend and
+  ``scrapyd.launchregistry.MemoryLaunchRegistry`` otherwise
+Options
+  -  ``scrapyd.launchregistry.SqliteLaunchRegistry`` stores the records in a SQLite database named
+     ``launch_registry.db``, in the :ref:`dbs_dir` directory
+  -  ``scrapyd.launchregistry.MemoryLaunchRegistry`` stores the records in memory
+  -  Implement your own, using the :py:interface:`~scrapyd.interfaces.ILaunchRegistry` interface
+
 Directory options
 -----------------
 
@@ -492,6 +513,7 @@ Options
 Used by
   -  :ref:`spiderqueue` (``scrapyd.spiderqueue.SqliteSpiderQueue``)
   -  :ref:`jobstorage` (``scrapyd.jobstorage.SqliteJobStorage``)
+  -  :ref:`launchregistry` (``scrapyd.launchregistry.SqliteLaunchRegistry``)
 
 .. attention:: Each ``*_dir`` setting must point to a different directory.
 

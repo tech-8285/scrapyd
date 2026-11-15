@@ -24,7 +24,11 @@ Example:
 .. code-block:: shell-session
 
    $ curl http://localhost:6800/daemonstatus.json
-   {"node_name": "mynodename", "status": "ok", "pending": 0, "running": 0, "finished": 0}
+   {"node_name": "mynodename", "status": "ok", "pending": 0, "launching": 0, "running": 0, "finished": 0}
+
+``pending`` counts jobs still in a spider queue, ``launching`` counts jobs that left a spider queue but whose crawl
+process has not yet been confirmed to start, ``running`` counts crawl processes that started, and ``finished`` counts
+jobs in the :ref:`jobstorage` backend.
 
 .. _addversion.json:
 
@@ -137,7 +141,10 @@ Parameters
   ``project``
     the project name
 
-The job's status is indicated by the ``currstate`` key whose value is one of ``'pending'``, ``'running'`` or ``'finished'`` – or ``None`` if the job is not found.
+The job's status is indicated by the ``currstate`` key. Its value is one of ``'pending'`` (still in a spider queue),
+``'launching'`` (dequeued, crawl process not yet confirmed to start), ``'running'`` (crawl process started),
+``'finished'``, ``'failed'`` (the crawl process could not be started), ``'orphaned'`` (the process started under a
+previous Scrapyd process and is no longer alive) – or ``None`` if the job is not found.
 
 Example:
 
@@ -154,6 +161,7 @@ cancel.json
 Cancel a job.
 
 -  If the job is pending, it is removed from the project's spider queue.
+-  If the job is launching (dequeued but not yet started), it is given an explicit ``failed`` state so that it is neither silently lost nor started after the cancellation.
 -  If the job is running, the process is sent a signal to terminate.
 
 Supported request methods
@@ -246,10 +254,12 @@ Example:
 listjobs.json
 -------------
 
-Get the pending, running and finished jobs of a project.
+Get the pending, launching, running, failed and finished jobs of a project.
 
 -  Pending jobs are in :ref:`spider queues<spiderqueue>`.
+-  Launching jobs left a spider queue but have no confirmed crawl process yet (they are tracked by the :ref:`launchregistry`).
 -  Running jobs have Scrapy processes.
+-  Failed jobs could not start a crawl process, and orphaned jobs started under a previous Scrapyd process and ended without reaching the job storage.
 -  Finished jobs are in :ref:job storage<jobstorage>`.
 
    .. note::

@@ -78,6 +78,63 @@ class IPoller(Interface):
         """
 
 
+class ILaunchRegistry(Interface):
+    """
+    A component that records jobs between the moment they leave the spider queue and the moment their crawl process
+    is known to have started (or to have failed to start).
+
+    It closes the gap in which a pending job has been popped from its (possibly persistent) spider queue, but its crawl
+    process has not started yet. Without this record, a failure or a service restart in that window silently loses the
+    job.
+    """
+
+    def claim(project, queue):
+        """
+        Atomically remove the next pending job from the spider ``queue`` of ``project`` and record it in a launching
+        state.
+
+        Either both operations succeed (the job is durably recorded as launching) or neither does (the job remains in
+        the queue). Return the recorded message, or ``None`` if the queue is empty or the job vanished (for example, if
+        two Scrapyd instances share a spider queue database).
+        """
+
+    def requeue(entry, queues):
+        """
+        Put a never-started job back into its spider queue (found by the entry's project in ``queues``), preserving its
+        original priority, and remove its record.
+        """
+
+    def mark_running(project, job, pid):
+        """Record that the crawl process of the job actually started, with its operating system ``pid``."""
+
+    def finish(project, job):
+        """Remove the record of a job whose crawl process has ended."""
+
+    def fail(project, job, error):
+        """Record an explicit terminal state for a job whose crawl process failed to start."""
+
+    def orphan(project, job):
+        """Record an explicit terminal state for a job whose process ended without reaching finished-job storage."""
+
+    def recover(queues):
+        """
+        Reconcile records left by a previous process.
+
+        Never-started jobs are put back in their spider queues. Jobs that are proven to have started are either kept in
+        a running state (if the process is still alive) or moved to an explicit terminal state. Return the number of
+        jobs that were put back in their queues.
+        """
+
+    def active(project=None):
+        """Iterate over the launching and running records, optionally restricted to a project."""
+
+    def list():
+        """Iterate over all records, including records in explicit terminal states."""
+
+    def count_active():
+        """Return the number of launching and running records."""
+
+
 class ISpiderQueue(Interface):
     """
     A component to store pending jobs.

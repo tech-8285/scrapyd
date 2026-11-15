@@ -1,13 +1,19 @@
 import datetime
 import re
+import tempfile
+from pathlib import Path
+from unittest import mock
 
 import pytest
-from twisted.internet import defer, error
+from twisted.application.service import IServiceCollection
+from twisted.internet import defer, error, reactor
 from twisted.logger import LogLevel, capturedLogs
 from twisted.python import failure
 
 from scrapyd import __version__
+from scrapyd.app import application as build_application
 from scrapyd.config import Config
+from scrapyd.interfaces import ILaunchRegistry, IPoller
 from scrapyd.launcher import Launcher, get_crawl_args
 from tests import get_message, has_settings
 
@@ -192,3 +198,66 @@ def test_process_ended_terminated(environ, process):
 
 def test_repr(process):
     assert repr(process).startswith(f"ScrapyProcessProtocol(project=p1 spider=s1 job=j1 pid={process.pid} start_time=")
+
+
+def test_spawn_failure_records_terminal_state_and_refills_slot(app, launcher, tmp_path):
+    registry = app.getComponent(ILaunchRegistry)
+    poller = app.getComponent(IPoller)
+    # Ensure at least one project exists in both the default and custom configurations.
+    (tmp_path / "eggs" / "p1").mkdir(parents=True, exist_ok=True)
+    poller.update_projects()
+    project = next(iter(poller.queues))
+    queue = poller.queues[project]
+    queue.add("s1", _job="j-lost")
+    # The claim step that happens in the poller when a slot is available.
+    claimed = registry.claim(project, queue)
+    assert claimed["_job"] == "j-lost"
+    message = {"_project": project, "_spider": "s1", "_job": "j-lost"}
+
+    with mock.patch.object(reactor, "spawnProcess", side_effect=OSError("cannot fork")):
+        launcher._spawn_process(message, 3)  # noqa: SLF001
+
+    # The job has an explicit terminal state instead of vanishing, and no slot is occupied.
+    entry = registry.get(project, "j-lost")
+    assert entry.state == "failed"
+    assert "cannot fork" in entry.error
+    assert 3 not in launcher.processes
+
+    # The slot was released and immediately armed again (a new waiting Deferred was registered).
+    assert poller.dq.waiting
+
+
+def test_recover_requeues_never_started_jobs():
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "eggs" / "localproject").mkdir(parents=True)
+    persistent = Config(
+        values={
+            "eggs_dir": str(tmp / "eggs"),
+            "dbs_dir": str(tmp / "dbs"),
+            "max_proc": "0",
+            "jobstorage": "scrapyd.jobstorage.SqliteJobStorage",
+        }
+    )
+
+    first = build_application(persistent)
+    first_poller = first.getComponent(IPoller)
+    first_registry = first.getComponent(ILaunchRegistry)
+    queue = first_poller.queues["localproject"]
+    queue.add("s1", _job="j-recover")
+    first_registry.claim("localproject", queue)
+    assert queue.count() == 0
+
+    second = build_application(persistent)
+    second_launcher = IServiceCollection(second, second).getServiceNamed("launcher")
+    second_launcher._recover()  # noqa: SLF001
+
+    restored = second.getComponent(IPoller).queues["localproject"].list()
+    assert restored == [{"name": "s1", "_job": "j-recover"}]
+    assert second.getComponent(ILaunchRegistry).get("localproject", "j-recover") is None
+
+
+def test_connection_made_marks_job_running(process):
+    # The process fixture bypasses the registry, so marking must be tolerant of an absent record.
+    pid = process.pid
+    process.connectionMade()
+    assert process.pid == pid

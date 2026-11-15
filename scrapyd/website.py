@@ -10,7 +10,7 @@ from twisted.application.service import IServiceCollection
 from twisted.python import filepath
 from twisted.web import resource, static
 
-from scrapyd.interfaces import IEggStorage, IPoller, ISpiderScheduler
+from scrapyd.interfaces import IEggStorage, ILaunchRegistry, IPoller, ISpiderScheduler
 from scrapyd.utils import local_items
 
 
@@ -183,6 +183,10 @@ class Root(resource.Resource):
     def poller(self):
         return self.app.getComponent(IPoller)
 
+    @property
+    def registry(self):
+        return self.app.getComponent(ILaunchRegistry)
+
 
 class PrefixHeaderMixin:
     def get_base_path(self, txrequest):
@@ -308,7 +312,8 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
         return f"<tr>\n{indent(tds, '    ')}\n</tr>"
 
     def prepare_pending(self):
-        return "\n".join(
+        # Pending jobs in a spider queue, followed by jobs that left a queue but whose crawl process has not started.
+        rows = [
             self.prepare_row(
                 {
                     "Project": escape(project),
@@ -319,7 +324,21 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
             )
             for project, queue in self.root.poller.queues.items()
             for message in queue.list()
+        ]
+        rows.extend(
+            self.prepare_row(
+                {
+                    "Project": escape(entry.project),
+                    "Spider": escape(entry.spider),
+                    "Job": escape(entry.job),
+                    "Start": no_microseconds(entry.start_time) if entry.start_time is not None else None,
+                    "Cancel": self.cancel_button(entry.project, entry.job),
+                }
+            )
+            for entry in self.root.registry.active()
+            if entry.state == "launching"
         )
+        return "\n".join(row for row in rows if row)
 
     def prepare_running(self):
         return "\n".join(
@@ -340,7 +359,8 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
         )
 
     def prepare_finished(self):
-        return "\n".join(
+        # Jobs that reached the finished-job storage, followed by jobs with explicit failed/orphaned terminal states.
+        rows = [
             self.prepare_row(
                 {
                     "Project": escape(job.project),
@@ -354,7 +374,21 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
                 }
             )
             for job in self.root.launcher.finished
+        ]
+        rows.extend(
+            self.prepare_row(
+                {
+                    "Project": escape(entry.project),
+                    "Spider": escape(entry.spider),
+                    "Job": f"{escape(entry.job)} ({escape(entry.state)})",
+                    "Start": no_microseconds(entry.start_time) if entry.start_time is not None else None,
+                    "Finish": no_microseconds(entry.end_time) if entry.end_time is not None else None,
+                }
+            )
+            for entry in self.root.registry.list()
+            if entry.state in ("failed", "orphaned")
         )
+        return "\n".join(row for row in rows if row)
 
     def render_GET(self, txrequest):
         self.base_path = self.get_base_path(txrequest)
@@ -385,7 +419,7 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
                     </thead>
                     <tbody>
                         <tr>
-                            <th colspan="{len(self.headers)}">Pending</th>
+                            <th colspan="{len(self.headers)}">Pending (queued and launching)</th>
                         </tr>
 {indent(self.prepare_pending(), "                        ")}
                     </tbody>
@@ -397,7 +431,7 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
                     </tbody>
                     <tbody>
                         <tr>
-                            <th colspan="{len(self.headers)}">Finished</th>
+                            <th colspan="{len(self.headers)}">Finished (including failed and orphaned)</th>
                         </tr>
 {indent(self.prepare_finished(), "                        ")}
                     </tbody>

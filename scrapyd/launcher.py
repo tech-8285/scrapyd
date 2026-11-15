@@ -8,8 +8,7 @@ from twisted.internet import defer, error, protocol, reactor
 from twisted.logger import Logger
 
 from scrapyd import __version__
-from scrapyd.exceptions import LauncherError
-from scrapyd.interfaces import IEnvironment, IJobStorage, IPoller
+from scrapyd.interfaces import IEnvironment, IJobStorage, ILaunchRegistry, IPoller
 
 log = Logger()
 
@@ -34,6 +33,7 @@ class Launcher(Service):
     def __init__(self, config, app):
         self.processes = {}
         self.finished = app.getComponent(IJobStorage)
+        self.registry = app.getComponent(ILaunchRegistry)
         self.max_proc = self._get_max_proc(config)
         self.runner = config.get("runner", "scrapyd.runner")
         self.app = app
@@ -46,8 +46,34 @@ class Launcher(Service):
             runner=self.runner,
             log_system="Launcher",
         )
+        self._recover()
         for slot in range(self.max_proc):
             self._get_message(slot)
+
+    def _recover(self):
+        """
+        Reconcile jobs that left the spider queue but never reached a known state in a previous process.
+
+        Never-started jobs return to their spider queue (pending), proven-running survivors stay running, and processes
+        that died without reaching the finished-job storage get an explicit terminal state.
+        """
+        poller = self.app.getComponent(IPoller)
+        requeued = self.registry.recover(poller.queues)
+        if requeued:
+            log.warn(  # noqa: G010 Twisted's Logger provides warn(), not warning()
+                "Recovered {count} job(s) that were dequeued but never started; they are pending again.",
+                count=requeued,
+                log_system="Launcher",
+            )
+        for entry in self.registry.active():
+            if entry.state == "running":
+                log.warn(  # noqa: G010 Twisted's Logger provides warn(), not warning()
+                    "Job {job!r} of project {project!r} is still running as pid {pid}; it is not started again.",
+                    job=entry.job,
+                    project=entry.project,
+                    pid=entry.pid,
+                    log_system="Launcher",
+                )
 
     def _get_message(self, slot):
         poller = self.app.getComponent(IPoller)
@@ -56,6 +82,7 @@ class Launcher(Service):
 
     def _spawn_process(self, message, slot):
         project = message["_project"]
+        job = message["_job"]
         environment = self.app.getComponent(IEnvironment)
         message.setdefault("settings", {})
         message["settings"].update(environment.get_settings(message))
@@ -63,13 +90,24 @@ class Launcher(Service):
         env = environment.get_environment(message, slot)
         args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
 
-        process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
+        process = ScrapyProcessProtocol(project, message["_spider"], job, env, args, self.registry)
         process.deferred.addBoth(self._process_finished, slot)
 
         try:
             reactor.spawnProcess(process, sys.executable, args=args, env=env)
         except OSError as e:
-            raise LauncherError(f"{e}: args={args!r}") from e
+            # The crawl process never started. Record an explicit terminal state, release the slot and let another
+            # pending job use it: the job is neither silently lost nor holding a slot forever.
+            self.registry.fail(project, job, e)
+            log.failure(
+                "Failed to start process for project={project!r} spider={spider!r} job={job!r}",
+                project=project,
+                spider=process.spider,
+                job=job,
+                log_system="Launcher",
+            )
+            self._get_message(slot)
+            return
 
         self.processes[slot] = process
         log.debug("Process slot {slot} occupied", slot=slot)
@@ -77,6 +115,7 @@ class Launcher(Service):
     def _process_finished(self, _, slot):
         process = self.processes.pop(slot)
         process.end_time = datetime.datetime.now()
+        self.registry.finish(process.project, process.job)
         self.finished.add(process)
         log.debug("Process slot {slot} vacated", slot=slot)
 
@@ -96,7 +135,7 @@ class Launcher(Service):
 
 # https://docs.twisted.org/en/stable/api/twisted.internet.protocol.ProcessProtocol.html
 class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing __hash__ method
-    def __init__(self, project, spider, job, env, args):
+    def __init__(self, project, spider, job, env, args, registry=None):
         self.project = project
         self.spider = spider
         self.job = job
@@ -105,6 +144,7 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing 
         self.end_time = None
         self.args = args
         self.env = env
+        self.registry = registry
         self.deferred = defer.Deferred()
 
     # For equality assertions in tests.
@@ -135,6 +175,10 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing 
 
     def connectionMade(self):
         self.pid = self.transport.pid
+        # The crawl process is now proven to have started. Promote the durable record so that a crash after this point
+        # is not mistaken for a never-started (and therefore safely re-runnable) job on recovery.
+        if self.registry is not None:
+            self.registry.mark_running(self.project, self.job, self.pid)
         self.log("info", "Process started:")
 
     # https://docs.twisted.org/en/stable/core/howto/process.html#things-that-can-happen-to-your-processprotocol

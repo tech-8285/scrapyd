@@ -10,6 +10,11 @@ Added
 ~~~~~
 
 - Add DEBUG-level messages to the :ref:`schedule.json` and :ref:`cancel.json` webservices.
+- Add a :ref:`launchregistry` component that durably records jobs from the moment they leave a spider queue until their
+  crawl process starts, so a failure or a restart in that window neither silently loses an accepted job nor runs it
+  twice. Never-started jobs return to their spider queue on startup; dead processes get an explicit ``orphaned`` state.
+- Add ``launching`` to :ref:`daemonstatus.json` and ``launching`` and ``failed`` lists to :ref:`listjobs.json`, and
+  extend the ``currstate`` values of :ref:`status.json` with ``launching``, ``failed`` and ``orphaned``.
 
 Changed
 ~~~~~~~
