@@ -10,11 +10,13 @@ Added
 ~~~~~
 
 - Add DEBUG-level messages to the :ref:`schedule.json` and :ref:`cancel.json` webservices.
+- Add a ``delete()`` method to the :py:interface:`~scrapyd.interfaces.ISpiderQueue` interface, to delete a project's spider queue and its database file.
 
 Changed
 ~~~~~~~
 
 - Clarify error message when the launcher fails to spawn processes.
+- The :ref:`delversion.json` and :ref:`delproject.json` webservices now dispose of the deleted project's or version's jobs: pending jobs are removed from the spider queue, running jobs are terminated, and the launcher no longer spawns orphan crawls whose project or version was deleted between queue pop and process spawn. Finished jobs are kept.
 
 Removed
 ~~~~~~~

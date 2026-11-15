@@ -9,7 +9,7 @@ from twisted.logger import Logger
 
 from scrapyd import __version__
 from scrapyd.exceptions import LauncherError
-from scrapyd.interfaces import IEnvironment, IJobStorage, IPoller
+from scrapyd.interfaces import IEggStorage, IEnvironment, IJobStorage, IPoller
 
 log = Logger()
 
@@ -56,6 +56,19 @@ class Launcher(Service):
 
     def _spawn_process(self, message, slot):
         project = message["_project"]
+
+        # A project or version can have been deleted after the message was queued, for example if a delete request
+        # was processed between the poller's pop and this callback. Don't spawn an orphan crawl without an egg version.
+        if self._is_orphan_message(message):
+            log.info(
+                "Skipping crawl of deleted project/version: project={project!r} job={job!r}",
+                project=project,
+                job=message.get("_job"),
+            )
+            # The message's slot never became a process, so make the slot wait for another message again.
+            self._get_message(slot)
+            return
+
         environment = self.app.getComponent(IEnvironment)
         message.setdefault("settings", {})
         message["settings"].update(environment.get_settings(message))
@@ -63,7 +76,9 @@ class Launcher(Service):
         env = environment.get_environment(message, slot)
         args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
 
-        process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
+        process = ScrapyProcessProtocol(
+            project, message["_spider"], message["_job"], env, args, version=message.get("_version")
+        )
         process.deferred.addBoth(self._process_finished, slot)
 
         try:
@@ -73,6 +88,30 @@ class Launcher(Service):
 
         self.processes[slot] = process
         log.debug("Process slot {slot} occupied", slot=slot)
+
+    def _is_orphan_message(self, message):
+        """Return whether the message targets a project or version that no longer exists."""
+        poller = self.app.getComponent(IPoller)
+        project = message["_project"]
+
+        # A project that is no longer in the poller's queues was deleted (update_projects() is called on deletion).
+        if project not in poller.queues:
+            return True
+
+        # A message without a version uses the default version, which exists as long as the project exists.
+        version = message.get("_version")
+        if version is None:
+            return False
+
+        # Projects can also be defined via a [settings] section without an egg. Only check egg storage in that case.
+        eggstorage = self.app.getComponent(IEggStorage)
+        egg_version, egg_file = eggstorage.get(project, version)
+        try:
+            return (egg_version, egg_file) == (None, None)
+        finally:
+            # get() opens the egg file, which we don't need here; close it to avoid leaking a file descriptor.
+            if egg_file is not None:
+                egg_file.close()
 
     def _process_finished(self, _, slot):
         process = self.processes.pop(slot)
@@ -96,10 +135,12 @@ class Launcher(Service):
 
 # https://docs.twisted.org/en/stable/api/twisted.internet.protocol.ProcessProtocol.html
 class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing __hash__ method
-    def __init__(self, project, spider, job, env, args):
+    def __init__(self, project, spider, job, env, args, *, version=None):
         self.project = project
         self.spider = spider
         self.job = job
+        # The egg version used by the crawl, or None for the project's default version.
+        self.version = version
         self.pid = None
         self.start_time = datetime.datetime.now()
         self.end_time = None
@@ -113,6 +154,7 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing 
             self.project == other.project
             and self.spider == other.spider
             and self.job == other.job
+            and self.version == other.version
             and self.pid == other.pid
             and self.start_time == other.start_time
             and self.end_time == other.end_time
@@ -124,7 +166,8 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):  # noqa: PLW1641 missing 
     def __repr__(self):
         return (
             f"ScrapyProcessProtocol(project={self.project} spider={self.spider} job={self.job} pid={self.pid} "
-            f"start_time={self.start_time} end_time={self.end_time} args={self.args} env={self.env})"
+            f"start_time={self.start_time} end_time={self.end_time} version={self.version} "
+            f"args={self.args} env={self.env})"
         )
 
     def outReceived(self, data):

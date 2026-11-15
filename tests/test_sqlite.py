@@ -1,4 +1,5 @@
 import datetime
+import sqlite3
 
 import pytest
 
@@ -100,6 +101,28 @@ def test_jsonsqlitepriorityqueue_remove(jsonsqlitepriorityqueue):
     jsonsqlitepriorityqueue.remove(lambda x: x.startswith("bad"))
 
     assert list(jsonsqlitepriorityqueue) == [(msg1, 0.0), (msg3, 0.0)]
+
+
+def test_jsonsqlitepriorityqueue_delete_memory(jsonsqlitepriorityqueue):
+    jsonsqlitepriorityqueue.put("a message")
+    jsonsqlitepriorityqueue.delete()
+
+    # The connection is closed.
+    with pytest.raises(sqlite3.ProgrammingError):
+        len(jsonsqlitepriorityqueue)
+
+
+def test_jsonsqlitepriorityqueue_delete_file(tmp_path):
+    database = tmp_path / "queue.db"
+    queue = JsonSqlitePriorityQueue(str(database))
+    queue.put("a message")
+    assert database.exists()
+
+    queue.delete()
+
+    assert not database.exists()
+    # Deleting again doesn't raise (the file is already gone).
+    queue.delete()
 
 
 @pytest.mark.parametrize(

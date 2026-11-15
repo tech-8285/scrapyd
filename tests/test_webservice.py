@@ -484,6 +484,179 @@ def test_delete_project_nonexistent(txrequest, root):
     assert_error(txrequest, root, "POST", "delproject", args, b"project 'nonexistent' not found")
 
 
+def _make_running_process(project, job, *, version=None):
+    process = ScrapyProcessProtocol(project, "s1", job, env={}, args=[], version=version)
+    process.transport = MagicMock()
+    return process
+
+
+def test_delete_project_disposes_of_jobs(txrequest, root_with_egg):
+    # A second project, whose jobs must be left untouched.
+    root_add_version(root_with_egg, "other", "r1", "mybot2")
+    root_with_egg.update_projects()
+
+    # Pending jobs: one with a version, one without a version (default version), for each project.
+    root_with_egg.poller.queues["mybot"].add("s1", _job="pending-1", _version="0.1")
+    root_with_egg.poller.queues["mybot"].add("s1", _job="pending-2")
+    root_with_egg.poller.queues["other"].add("s2", _job="pending-other")
+
+    # Running jobs of the deleted project, plus one of another project.
+    running = _make_running_process("mybot", "running-1", version="0.1")
+    running_default = _make_running_process("mybot", "running-2")
+    running_other = _make_running_process("other", "running-other")
+    root_with_egg.launcher.processes[0] = running
+    root_with_egg.launcher.processes[1] = running_default
+    root_with_egg.launcher.processes[2] = running_other
+
+    # Finished jobs are history and must be kept.
+    root_with_egg.launcher.finished.add(get_finished_job("mybot", "s1", "finished-1"))
+    root_with_egg.launcher.finished.add(get_finished_job("other", "s2", "finished-other"))
+
+    args = {b"project": [b"mybot"]}
+    assert_content(txrequest, root_with_egg, "POST", "delproject", args, {"status": "ok"})
+
+    # All pending jobs of the project are gone; the other project's queue is untouched.
+    assert root_with_egg.poller.queues["other"].list() == [
+        {"name": "s2", "_job": "pending-other"}
+    ]
+    assert "mybot" not in root_with_egg.poller.queues
+
+    # Running jobs of the project received the termination signal; the other project's did not.
+    running.transport.signalProcess.assert_called_once_with("INT" if sys.platform != "win32" else "21")
+    running_default.transport.signalProcess.assert_called_once_with("INT" if sys.platform != "win32" else "21")
+    running_other.transport.signalProcess.assert_not_called()
+
+    # Finished history is untouched, including for the deleted project.
+    assert {job.job for job in root_with_egg.launcher.finished} == {"finished-other", "finished-1"}
+
+
+def test_delete_version_disposes_of_matching_jobs(txrequest, root):
+    root_add_version(root, "mybot", "r1", "mybot")
+    root_add_version(root, "mybot", "r2", "mybot2")
+    root.update_projects()
+
+    # Pending jobs: the deleted version, another version and the default version (no _version).
+    root.poller.queues["mybot"].add("s1", _job="p-r1", _version="r1")
+    root.poller.queues["mybot"].add("s1", _job="p-r2", _version="r2")
+    root.poller.queues["mybot"].add("s1", _job="p-default")
+    assert root.poller.queues["mybot"].count() == 3
+
+    # Running jobs: one on the deleted version, one on the other version, one on the default version.
+    running_r1 = _make_running_process("mybot", "r-running-1", version="r1")
+    running_r2 = _make_running_process("mybot", "r-running-2", version="r2")
+    running_default = _make_running_process("mybot", "r-running-3")
+    root.launcher.processes[0] = running_r1
+    root.launcher.processes[1] = running_r2
+    root.launcher.processes[2] = running_default
+
+    args = {b"project": [b"mybot"], b"version": [b"r1"]}
+    assert_content(txrequest, root, "POST", "delversion", args, {"status": "ok"})
+
+    # Only the pending job of the deleted version is removed.
+    assert {(message["_job"], message.get("_version")) for message in root.poller.queues["mybot"].list()} == {
+        ("p-r2", "r2"),
+        ("p-default", None),
+    }
+
+    # Only the running job of the deleted version is signaled.
+    running_r1.transport.signalProcess.assert_called_once_with("INT" if sys.platform != "win32" else "21")
+    running_r2.transport.signalProcess.assert_not_called()
+    running_default.transport.signalProcess.assert_not_called()
+
+
+def test_delete_last_version_clears_whole_queue(txrequest, root):
+    root_add_version(root, "mybot", "r1", "mybot")
+    root.update_projects()
+
+    root.poller.queues["mybot"].add("s1", _job="p-versioned", _version="r1")
+    root.poller.queues["mybot"].add("s1", _job="p-default")
+    running = _make_running_process("mybot", "running-1", version="r1")
+    root.launcher.processes[0] = running
+
+    args = {b"project": [b"mybot"], b"version": [b"r1"]}
+    assert_content(txrequest, root, "POST", "delversion", args, {"status": "ok"})
+
+    # The project itself is gone (no versions remain), so every pending job and running job is disposed of.
+    assert "mybot" not in root.poller.queues
+    running.transport.signalProcess.assert_called_once_with("INT" if sys.platform != "win32" else "21")
+
+
+def test_delete_project_repeated_is_idempotent(txrequest, root_with_egg):
+    root_with_egg.poller.queues["mybot"].add("s1", _job="pending-1")
+
+    args = {b"project": [b"mybot"]}
+    assert_content(txrequest, root_with_egg, "POST", "delproject", args, {"status": "ok"})
+    assert "mybot" not in root_with_egg.poller.queues
+
+    # A second deletion reports the same error as deleting an unknown project, without touching other projects.
+    assert_error(txrequest, root_with_egg, "POST", "delproject", args, b"project 'mybot' not found")
+
+
+def test_delete_version_with_no_jobs(txrequest, root):
+    root_add_version(root, "mybot", "r1", "mybot")
+    root_add_version(root, "mybot", "r2", "mybot2")
+    root.update_projects()
+
+    args = {b"project": [b"mybot"], b"version": [b"r1"]}
+    assert_content(txrequest, root, "POST", "delversion", args, {"status": "ok"})
+    assert root.eggstorage.get("mybot", "r1") == (None, None)
+    assert root.poller.queues["mybot"].count() == 0
+
+
+def test_delete_project_removes_queue_database(txrequest, root_with_egg, chdir):
+    root_with_egg.scheduler.schedule("mybot", "spider1", _job="j1", _version="0.1")
+    db_path = chdir / "dbs" / "mybot.db"
+    assert db_path.exists()
+
+    args = {b"project": [b"mybot"]}
+    assert_content(txrequest, root_with_egg, "POST", "delproject", args, {"status": "ok"})
+
+    # The queue database is removed with the project.
+    assert not db_path.exists()
+
+    # Re-uploading a project with the same name must not resurrect its old pending jobs (no orphan crawls).
+    root_add_version(root_with_egg, "mybot", "0.2", "mybot")
+    root_with_egg.update_projects()
+    new_queue = root_with_egg.poller.queues["mybot"]
+    assert new_queue.count() == 0
+    assert new_queue.list() == []
+
+    # A newly scheduled job starts from an empty queue, rather than joining resurrected stale jobs.
+    root_with_egg.scheduler.schedule("mybot", "spider1", _job="j2", _version="0.2")
+    assert [message["_job"] for message in new_queue.list()] == ["j2"]
+
+
+def test_delete_last_version_removes_queue_database(txrequest, root, chdir):
+    root_add_version(root, "mybot", "r1", "mybot")
+    root.update_projects()
+    root.scheduler.schedule("mybot", "spider1", _job="j1", _version="r1")
+    db_path = chdir / "dbs" / "mybot.db"
+    assert db_path.exists()
+
+    args = {b"project": [b"mybot"], b"version": [b"r1"]}
+    assert_content(txrequest, root, "POST", "delversion", args, {"status": "ok"})
+
+    assert not db_path.exists()
+    assert "mybot" not in root.poller.queues
+
+
+def test_delete_version_keeps_queue_database(txrequest, root, chdir):
+    root_add_version(root, "mybot", "r1", "mybot")
+    root_add_version(root, "mybot", "r2", "mybot2")
+    root.update_projects()
+    root.scheduler.schedule("mybot", "spider1", _job="keep", _version="r2")
+    root.scheduler.schedule("mybot", "spider1", _job="drop", _version="r1")
+    db_path = chdir / "dbs" / "mybot.db"
+
+    args = {b"project": [b"mybot"], b"version": [b"r1"]}
+    assert_content(txrequest, root, "POST", "delversion", args, {"status": "ok"})
+
+    # The project survives, so its queue database survives with only the remaining version's jobs.
+    assert db_path.exists()
+    assert [message["_job"] for message in root.poller.queues["mybot"].list()] == ["keep"]
+    assert root.scheduler.queues["mybot"].count() == 1
+
+
 def test_add_version(txrequest, root):
     assert root.eggstorage.get("mybot") == (None, None)
 

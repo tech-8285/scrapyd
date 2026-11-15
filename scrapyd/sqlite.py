@@ -104,6 +104,12 @@ class JsonSqlitePriorityQueue(SqliteMixin):
         self.conn.execute(f"DELETE FROM {self.table}")
         self.conn.commit()
 
+    def delete(self):
+        """Close the connection and remove the database file, if it is a file-backed database."""
+        self.conn.close()
+        if self.database != ":memory:":
+            Path(self.database).unlink(missing_ok=True)
+
     def __iter__(self):
         return (
             (self.decode(message), priority)

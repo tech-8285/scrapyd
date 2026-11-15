@@ -28,3 +28,6 @@ class SqliteSpiderQueue:
 
     def clear(self):
         self.q.clear()
+
+    def delete(self):
+        self.q.delete()

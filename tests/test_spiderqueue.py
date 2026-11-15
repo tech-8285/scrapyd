@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from twisted.internet.defer import inlineCallbacks, maybeDeferred
 from zope.interface.verify import verifyObject
@@ -72,3 +74,14 @@ def test_clear(spiderqueue):
     yield maybeDeferred(spiderqueue.clear)
 
     assert (yield maybeDeferred(spiderqueue.count)) == 0
+
+
+@inlineCallbacks
+def test_delete(spiderqueue):
+    yield maybeDeferred(spiderqueue.add, "spider1", 10, **spider_args)
+
+    yield maybeDeferred(spiderqueue.delete)
+
+    # The connection is closed, so the queue can no longer be queried.
+    with pytest.raises(sqlite3.ProgrammingError):
+        yield maybeDeferred(spiderqueue.count)

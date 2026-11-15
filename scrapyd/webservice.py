@@ -410,6 +410,10 @@ class ListJobs(WsResource):
 
 
 class DeleteProject(WsResource):
+    # Instead of os.name, use sys.platform, which disambiguates Cygwin, which implements SIGINT not SIGBREAK.
+    # Use the number 21 for SIGBREAK, because Twisted doesn't recognize "BREAK".
+    default_signal = "INT" if sys.platform != "win32" else "21"
+
     @param("project")
     def render_POST(self, txrequest, project):
         self._delete_version(project)
@@ -417,14 +421,57 @@ class DeleteProject(WsResource):
         return {}
 
     def _delete_version(self, project, version=None):
+        # Delete the egg first, so that an unknown project/version raises before any job is touched.
         try:
             self.root.eggstorage.delete(project, version)
         except ProjectNotFoundError as e:
             raise error.Error(code=http.OK, message=b"project '%b' not found" % project.encode()) from e
         except EggNotFoundError as e:
             raise error.Error(code=http.OK, message=b"version '%b' not found" % version.encode()) from e
-        else:
-            self.root.update_projects()
+
+        # FilesystemEggStorage.delete() also removes the project itself when no version remains.
+        project_removed = self.root.eggstorage.get(project) == (None, None)
+        self._delete_jobs(project, version, project_removed)
+        self.root.update_projects()
+
+    def _delete_jobs(self, project, version, project_removed):
+        """Dispose of the pending and running jobs of the deleted project (or version).
+
+        Pending jobs are removed from the spider queue, so they can never be dispatched as orphan crawls without an
+        egg version. Running jobs are sent the termination signal; once the processes end, they move to the finished
+        jobs as usual. Finished jobs are kept untouched, as are the jobs of other projects and versions.
+        """
+        # The poller and scheduler own separate queue objects (and database connections) for the same project.
+        queues = [
+            self.root.poller.queues.get(project),
+            self.root.scheduler.queues.get(project),
+        ]
+        for queue in queues:
+            if queue is None:
+                continue
+            if version is None or project_removed:
+                # The whole project is gone: delete the queue (and its database file), so that its pending jobs can
+                # never be dispatched or resurrected if a project with the same name is later uploaded. A custom
+                # ISpiderQueue implementation that predates delete() can clear() its pending jobs instead.
+                if hasattr(queue, "delete"):
+                    queue.delete()
+                else:
+                    queue.clear()
+            else:
+                # A single version is gone, but the project still has other versions. Jobs without an explicit
+                # version use the (remaining) default version and are therefore left in the queue.
+                queue.remove(lambda message: message.get("_version") == version)
+
+        for process in self.root.launcher.processes.values():
+            if process.project == project and (version is None or project_removed or process.version == version):
+                process.transport.signalProcess(self.default_signal)
+
+        log.debug(
+            "Jobs disposed on delete: project={project!r} version={version!r} project_removed={project_removed!r}",
+            project=project,
+            version=version,
+            project_removed=project_removed,
+        )
 
 
 class DeleteVersion(DeleteProject):

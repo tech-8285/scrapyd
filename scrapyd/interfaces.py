@@ -128,6 +128,13 @@ class ISpiderQueue(Interface):
         Remove all pending jobs.
         """
 
+    def delete():
+        """
+        Delete the queue itself, including any persistent data (like a database file), when its project is deleted.
+
+        .. versionadded:: 1.6.0
+        """
+
 
 class ISpiderScheduler(Interface):
     """

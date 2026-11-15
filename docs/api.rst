@@ -313,6 +313,11 @@ delversion.json
 
 Delete a version of a project from :ref:`eggstorage`. If no versions of the project remain, delete the project, too.
 
+Pending jobs of the deleted version are removed from the spider queue. If the project itself is deleted, all of its
+pending jobs are removed, and its spider queue database is deleted. Running jobs of the deleted version (or of the
+project, if the project is deleted) are terminated with the same signal as the :ref:`cancel.json` webservice.
+Finished jobs are kept.
+
 Supported request methods
   ``POST``
 Parameters
@@ -334,6 +339,11 @@ delproject.json
 ---------------
 
 Delete a project and its versions from :ref:`eggstorage`.
+
+All pending jobs of the project are removed from its spider queue, and the spider queue database is deleted, so that
+no crawl is dispatched without an egg version and so that pending jobs are not resurrected if a project with the same
+name is later uploaded. Running jobs of the project are terminated with the same signal as the :ref:`cancel.json`
+webservice. Finished jobs are kept, as are the jobs of other projects.
 
 Supported request methods
   ``POST``
