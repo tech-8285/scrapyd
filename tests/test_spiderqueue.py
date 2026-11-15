@@ -72,3 +72,39 @@ def test_clear(spiderqueue):
     yield maybeDeferred(spiderqueue.clear)
 
     assert (yield maybeDeferred(spiderqueue.count)) == 0
+
+
+def test_add_returns_whether_added(spiderqueue):
+    assert spiderqueue.add("spider1", 0, _job="j1") is True
+    _, sequence = spiderqueue.peek()
+
+    # The job keeps its position among jobs of equal priority, and only its priority is updated.
+    assert spiderqueue.add("spider1", 5, _job="j1") is False
+
+    assert spiderqueue.count() == 1
+    # The dispatch key is (-priority, sequence): a smaller key is dispatched earlier.
+    assert spiderqueue.peek() == (-5.0, sequence)
+
+
+def test_add_orders_equal_priorities(spiderqueue):
+    spiderqueue.add("spider1", 0, _job="j1")
+    spiderqueue.add("spider2", 0, _job="j2")
+    spiderqueue.add("spider3", 1, _job="j3")
+
+    assert spiderqueue.list() == [
+        {"name": "spider3", "_job": "j3"},
+        {"name": "spider1", "_job": "j1"},
+        {"name": "spider2", "_job": "j2"},
+    ]
+
+
+def test_peek_empty(spiderqueue):
+    assert spiderqueue.peek() is None
+
+
+def test_clear_resets_order(spiderqueue):
+    spiderqueue.add("spider1", 0, _job="j1")
+    spiderqueue.clear()
+    spiderqueue.add("spider2", 0, _job="j2")
+
+    assert spiderqueue.list() == [{"name": "spider2", "_job": "j2"}]

@@ -10,11 +10,21 @@ Added
 ~~~~~
 
 - Add DEBUG-level messages to the :ref:`schedule.json` and :ref:`cancel.json` webservices.
+- Persist the order in which the pending jobs were accepted, so that jobs of equal priority run in that order across
+  restarts.
 
 Changed
 ~~~~~~~
 
 - Clarify error message when the launcher fails to spawn processes.
+- Run the highest-priority pending job across all projects first, instead of polling the projects in an arbitrary but
+  constant order. A project with a backlog can no longer starve the other projects, and jobs of equal priority run in
+  the order in which they were scheduled.
+- Scheduling a job whose ``jobid`` is already pending updates its priority, instead of adding the job again, so that a
+  repeated or retried request cannot dispatch the same job twice. Scheduling a job whose ``jobid`` is already running
+  returns an error.
+- Return the pending jobs of the :ref:`listjobs.json` webservice in the order in which they are dispatched, across all
+  projects.
 
 Removed
 ~~~~~~~

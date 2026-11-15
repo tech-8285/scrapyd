@@ -151,7 +151,7 @@ The class that stores pending jobs.
 Default
   ``scrapyd.spiderqueue.SqliteSpiderQueue``
 Options
-  -  ``scrapyd.spiderqueue.SqliteSpiderQueue`` stores spider queues in SQLite databases named after each project, in the :ref:`dbs_dir` directory
+  -  ``scrapyd.spiderqueue.SqliteSpiderQueue`` stores spider queues in SQLite databases named after each project, in the :ref:`dbs_dir` directory. It stores a persisted sequence of accepted jobs in a database named ``queue_sequence``, so that a job of a given priority is never starved by jobs of a higher priority added later, and so that jobs of equal priority run in the order in which they were scheduled, even after a restart.
   -  Implement your own, using the :py:interface:`~scrapyd.interfaces.ISpiderQueue` interface
 Also used by
   -  :ref:`addversion.json` webservice, to create a queue if the project is new
@@ -182,6 +182,7 @@ Options
 
     -  The launcher adds :ref:`max_proc` capacity at startup, and one capacity each time a Scrapy process ends.
     -  The :ref:`application` starts a timer so that, every :ref:`poll_interval` seconds, jobs start if there's capacity: that is, if the number of Scrapy processes that are running is less than the :ref:`max_proc` value.
+    -  When there is capacity, the pending job of the highest priority runs first, regardless of its project; jobs of equal priority run in the order in which they were scheduled. So, a project with a backlog cannot starve the other projects.
 
   -  Implement your own, using the :py:interface:`~scrapyd.interfaces.IPoller` interface
 

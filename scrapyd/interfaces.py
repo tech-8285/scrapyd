@@ -87,6 +87,13 @@ class ISpiderQueue(Interface):
     -  :ref:`launcher` service (which calls :meth:`scrapyd.interfaces.IPoller.next`)
     -  :py:interface:`~scrapyd.interfaces.IEnvironment` implementation (see :meth:`scrapyd.interfaces.IPoller.next`)
     -  :ref:`webservices<config-services>` that schedule, cancel or list pending jobs
+
+    :meth:`pop` and :meth:`list` must return pending jobs in a deterministic order, so that the order in which jobs are
+    dispatched is reproducible: for example, after a restart, the order must be rebuildable from the accepted jobs.
+    The default implementations order jobs by descending priority, then by the order in which they were added.
+
+    .. versionchanged:: 1.7.0
+       Document that pending jobs must have a deterministic order.
     """
 
     def add(name, priority, **spider_args):
@@ -95,8 +102,14 @@ class ISpiderQueue(Interface):
         ``_job`` ID, egg ``_version`` and Scrapy ``settings`` depending on the implementation, with keyword arguments
         that are not recognized by the implementation being treated as spider arguments.
 
+        Adding a job whose ``_job`` ID is already pending is a no-op, and returns a false value, so that scheduling the
+        same job twice (for example, retrying a request after a restart) cannot dispatch it twice. Return a true value
+        otherwise.
+
         .. versionchanged:: 1.3.0
            Add the ``priority`` parameter.
+        .. versionchanged:: 1.7.0
+           Return whether the job was added.
         """
 
     def pop():
@@ -104,13 +117,43 @@ class ISpiderQueue(Interface):
         Pop the next pending job. The pending job is a ``dict`` containing the spider ``name``. Depending on the
         implementation, other keys might include the ``_job`` ID, egg ``_version`` and Scrapy ``settings``, with
         keyword arguments that are not recognized by the receiver being treated as spider arguments.
+
+        Jobs are popped by descending priority; jobs of equal priority are popped in the order in which they were added
+        (FIFO), so that a job of a given priority is never starved by jobs of a higher priority that are added later.
         """
 
     def list():
         """
-        Return the pending jobs.
+        Return the pending jobs, in the order in which they would be popped.
 
         .. seealso:: :meth:`scrapyd.interfaces.ISpiderQueue.pop`
+        """
+
+    def peek():
+        """
+        Return the dispatch key of the next pending job, or ``None`` if there are no pending jobs.
+
+        The dispatch keys of different projects must be comparable, and a smaller key must be dispatched earlier:
+        for example, ``(-priority, sequence)``, where ``sequence`` is the order in which the jobs were accepted. The
+        poller compares the keys of all projects, so that the highest-priority job runs first, regardless of its
+        project, and so that a project with a backlog cannot starve the other projects.
+
+        This method is optional: implement it, or set it to ``None``, if the spider queue cannot compare its next
+        pending job with the next pending job of another project. The poller then polls the projects in order, as in
+        prior versions.
+
+        .. versionadded:: 1.7.0
+        """
+
+    def pending():
+        """
+        Return the pending jobs, in the order in which they would be popped, as ``(message, dispatch key)`` pairs,
+        where ``dispatch key`` has the same meaning as in :meth:`peek`.
+
+        This method is optional: implement it, or set it to ``None``, if the spider queue can't order its pending jobs
+        together with those of the other projects. The webservices then list the projects in order.
+
+        .. versionadded:: 1.7.0
         """
 
     def count():

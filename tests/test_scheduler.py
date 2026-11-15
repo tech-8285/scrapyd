@@ -51,3 +51,41 @@ def test_schedule(scheduler):
     assert mybot1_queue.pop() == {"name": "myspider1", "a": "b"}
     assert mybot2_queue.pop() == {"name": "myspider3", "e": "f"}
     assert mybot2_queue.pop() == {"name": "myspider2", "c": "d"}
+
+
+def test_schedule_order_is_persistent(scheduler):
+    scheduler.schedule("mybot1", "myspider1", 0, _job="j1")
+    scheduler.schedule("mybot2", "myspider2", 0, _job="j2")
+
+    # A restart creates a new scheduler and new queues, which read the pending jobs from the databases.
+    scheduler = SpiderScheduler(scheduler.config)
+    queues = get_spider_queues(scheduler.config)
+
+    scheduler.schedule("mybot2", "myspider3", 0, _job="j3")
+
+    assert queues["mybot1"].list() == [{"name": "myspider1", "_job": "j1"}]
+    assert queues["mybot2"].list() == [
+        {"name": "myspider2", "_job": "j2"},
+        {"name": "myspider3", "_job": "j3"},
+    ]
+
+
+def test_schedule_priority_update(scheduler):
+    queues = get_spider_queues(scheduler.config)
+
+    assert scheduler.schedule("mybot1", "myspider1", 0, _job="j1") is True
+    scheduler.schedule("mybot1", "myspider2", 0, _job="j2")
+
+    # Scheduling a pending job again updates its priority, without changing its place among jobs of equal priority.
+    assert scheduler.schedule("mybot1", "myspider1", 5, _job="j1") is False
+
+    assert queues["mybot1"].list() == [
+        {"name": "myspider1", "_job": "j1"},
+        {"name": "myspider2", "_job": "j2"},
+    ]
+
+    scheduler.schedule("mybot1", "myspider3", 0, _job="j3")
+
+    assert queues["mybot1"].pop()["_job"] == "j1"
+    assert queues["mybot1"].pop()["_job"] == "j2"
+    assert queues["mybot1"].pop()["_job"] == "j3"

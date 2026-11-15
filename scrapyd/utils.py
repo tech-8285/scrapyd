@@ -30,6 +30,20 @@ def get_spider_queues(config):
     return {project: spiderqueue_cls(config, project) for project in get_project_list(config)}
 
 
+def get_pending_jobs(queues):
+    """Return the ``(project, message)`` pairs of the pending jobs, in the order in which they are dispatched.
+
+    The spider queues of all projects order their jobs together, by comparing the dispatch key of each project's next
+    pending job. See :meth:`scrapyd.interfaces.ISpiderQueue.peek`.
+    """
+    if not all(getattr(queue, "pending", None) for queue in queues.values()):
+        # Custom spider queues might not implement pending(): list the projects and their jobs in order.
+        return [(project, message) for project, queue in queues.items() for message in queue.list()]
+
+    pairs = [(key, project, message) for project, queue in queues.items() for message, key in queue.pending()]
+    return [(project, message) for _, project, message in sorted(pairs, key=lambda pair: (pair[0], pair[1]))]
+
+
 def get_project_list(config):
     """Get list of projects by inspecting the eggs storage and the ones defined in
     the scrapy.cfg [settings] section

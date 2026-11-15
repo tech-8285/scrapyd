@@ -396,6 +396,32 @@ def test_list_jobs(txrequest, root, scrapy_process, args, exists, chdir):
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
 
 
+def test_list_jobs_pending_order(txrequest, root):
+    # Two projects share the spider queue ordering, so listjobs returns their pending jobs in dispatch order.
+    root_add_version(root, "p1", "r1", "mybot")
+    root_add_version(root, "p2", "r2", "mybot2")
+    root.update_projects()
+
+    root.poller.queues["p1"].add("s1", _job="j1")
+    root.poller.queues["p2"].add("s2", _job="j2")
+    root.poller.queues["p1"].add("s1", _job="j3")
+    root.poller.queues["p2"].add("s2", priority=1, _job="j4")
+
+    expected = [("p2", "j4"), ("p1", "j1"), ("p2", "j2"), ("p1", "j3")]
+
+    txrequest.method = "GET"
+    txrequest.args = {}
+    data = json.loads(root.children[b"listjobs.json"].render(txrequest))
+
+    assert [(job["project"], job["id"]) for job in data["pending"]] == expected
+
+    # Filtering by project keeps the relative order.
+    txrequest.args = {b"project": [b"p1"]}
+    data = json.loads(root.children[b"listjobs.json"].render(txrequest))
+
+    assert [(job["project"], job["id"]) for job in data["pending"]] == [("p1", "j1"), ("p1", "j3")]
+
+
 def test_list_jobs_nonexistent(txrequest, root):
     args = {b"project": [b"nonexistent"]}
     assert_error(txrequest, root, "GET", "listjobs", args, b"project 'nonexistent' not found")
@@ -649,6 +675,41 @@ def test_schedule_parameters(txrequest, root_with_egg):
     }
 
 
+def test_schedule_priority_update(txrequest, root_with_egg):
+    txrequest.method = "POST"
+
+    for jobid in (b"j1", b"j2", b"j3"):
+        txrequest.args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [jobid], b"priority": [b"0"]}
+        root_with_egg.children[b"schedule.json"].render(txrequest)
+
+    # Scheduling a pending job again updates its priority, and the job keeps its place among jobs of equal priority.
+    txrequest.args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"j1"], b"priority": [b"5"]}
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+
+    assert json.loads(content) == {
+        "node_name": root_with_egg.node_name,
+        "status": "ok",
+        "jobid": "j1",
+    }
+    assert [job["_job"] for job in root_with_egg.poller.queues["mybot"].list()] == ["j1", "j2", "j3"]
+
+    # Raising the priority of another job keeps the acceptance order among the jobs that now share that priority.
+    txrequest.args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"j2"], b"priority": [b"5"]}
+    root_with_egg.children[b"schedule.json"].render(txrequest)
+
+    assert [job["_job"] for job in root_with_egg.poller.queues["mybot"].list()] == ["j1", "j2", "j3"]
+
+
+def test_schedule_running(txrequest, root_with_egg):
+    running = ScrapyProcessProtocol(project="mybot", spider="spider1", job="j1", env={}, args=[])
+    root_with_egg.launcher.processes[0] = running
+
+    args = {b"project": [b"mybot"], b"spider": [b"spider1"], b"jobid": [b"j1"]}
+
+    assert_error(txrequest, root_with_egg, "POST", "schedule", args, b"job 'j1' is already running")
+    assert not root_with_egg.poller.queues["mybot"].count()
+
+
 # Like test_list_spiders_nonexistent.
 @pytest.mark.parametrize(
     ("args", "param", "run_only_if_has_settings"),
@@ -684,10 +745,11 @@ def test_cancel(txrequest, root, scrapy_process, args):
     assert_content(txrequest, root, "POST", "cancel", args, expected)
 
     root.poller.queues["p1"].add("s1", _job="j1")
-    root.poller.queues["p1"].add("s1", _job="j1")
+    # Adding the same pending job again updates its priority, instead of dispatching it twice.
+    assert root.poller.queues["p1"].add("s1", priority=10, _job="j1") is False
     root.poller.queues["p1"].add("s1", _job="j2")
 
-    assert root.poller.queues["p1"].count() == 3
+    assert root.poller.queues["p1"].count() == 2
     expected["prevstate"] = "pending"
     assert_content(txrequest, root, "POST", "cancel", args, expected)
     assert root.poller.queues["p1"].count() == 1

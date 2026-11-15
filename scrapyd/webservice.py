@@ -16,6 +16,7 @@ from twisted.logger import Logger
 from twisted.web import error, http, resource
 
 from scrapyd.exceptions import EggNotFoundError, ProjectNotFoundError, RunnerError
+from scrapyd.utils import get_pending_jobs
 
 log = Logger()
 
@@ -187,6 +188,9 @@ class Schedule(WsResource):
        Add ``_version`` and ``jobid`` parameters.
     .. versionchanged:: 1.3.0
        Add ``priority`` parameter.
+    .. versionchanged:: 1.7.0
+       Scheduling a job whose ``jobid`` is already pending updates its priority, instead of adding it again.
+       Scheduling a job whose ``jobid`` is already running is an error.
     """
 
     @param("project")
@@ -207,11 +211,18 @@ class Schedule(WsResource):
         if spider not in spiders:
             raise error.Error(code=http.OK, message=b"spider '%b' not found" % spider.encode())
 
+        # A running job cannot be re-prioritized, and adding it to the queue would dispatch it twice.
+        for process in self.root.launcher.processes.values():
+            if process.project == project and process.job == jobid:
+                raise error.Error(code=http.OK, message=b"job '%b' is already running" % jobid.encode())
+
         args = {key.decode(): values[0].decode() for key, values in txrequest.args.items()}
         if version is not None:
             args["_version"] = version
 
-        self.root.scheduler.schedule(
+        # If the job is already pending, only its priority is updated, and it keeps its place among jobs of equal
+        # priority, so that a repeated or retried request neither dispatches the job twice nor reorders the queue.
+        added = self.root.scheduler.schedule(
             project,
             spider,
             priority=priority,
@@ -221,10 +232,11 @@ class Schedule(WsResource):
         )
 
         log.debug(
-            "Job scheduled: project={project!r} spider={spider!r} job={job!r}",
+            "Job scheduled: project={project!r} spider={spider!r} job={job!r} added={added!r}",
             project=project,
             spider=spider,
             job=jobid,
+            added=added,
         )
 
         return {"jobid": jobid}
@@ -359,6 +371,8 @@ class ListJobs(WsResource):
        Add ``log_url`` and ``items_url`` to finished jobs in the response.
     .. versionchanged:: 1.5.0
        Add ``version``, ``settings`` and ``args`` to pending jobs in the response.
+    .. versionchanged:: 1.7.0
+       Return pending jobs in the order in which they are dispatched, across all projects.
     """
 
     @param("project", required=False)
@@ -377,8 +391,7 @@ class ListJobs(WsResource):
                     "settings": message.get("settings", {}),
                     "args": {k: v for k, v in message.items() if k not in ("name", "_job", "_version", "settings")},
                 }
-                for queue_name in (queues if project is None else [project])
-                for message in queues[queue_name].list()
+                for queue_name, message in get_pending_jobs(queues if project is None else {project: queues[project]})
             ],
             "running": [
                 {

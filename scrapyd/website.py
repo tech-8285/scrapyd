@@ -11,7 +11,7 @@ from twisted.python import filepath
 from twisted.web import resource, static
 
 from scrapyd.interfaces import IEggStorage, IPoller, ISpiderScheduler
-from scrapyd.utils import local_items
+from scrapyd.utils import get_pending_jobs, local_items
 
 
 # Use local DirectoryLister class.
@@ -317,8 +317,7 @@ class Jobs(PrefixHeaderMixin, resource.Resource):
                     "Cancel": self.cancel_button(project, message["_job"]),
                 }
             )
-            for project, queue in self.root.poller.queues.items()
-            for message in queue.list()
+            for project, message in get_pending_jobs(self.root.poller.queues)
         )
 
     def prepare_running(self):

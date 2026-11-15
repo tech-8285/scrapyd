@@ -88,8 +88,14 @@ Parameters
     the project version (the latest project version by default)
   ``jobid``
     the job's ID (a hexadecimal UUID v1 by default)
+
+    If the job is already pending, its ``priority`` is updated, and it is not added a second time, so that a repeated
+    or retried request cannot dispatch the same job twice. If the job is already running, the request returns an error.
   ``priority``
-    the job's priority in the project's spider queue (0 by default, higher number, higher priority)
+    the job's priority (0 by default, higher number, higher priority)
+
+    Pending jobs run in descending order of priority, across all projects. Jobs of equal priority run in the order in
+    which they were scheduled (FIFO), including after a restart.
   ``setting``
     a Scrapy setting
 
@@ -254,6 +260,7 @@ Get the pending, running and finished jobs of a project.
 
    .. note::
 
+      -  Pending jobs are listed in the order in which they will be dispatched, across all projects (unless the ``project`` parameter is set).
       -  The default :ref:`jobstorage` setting stores jobs in memory, such that jobs are lost when the Scrapyd process ends.
       -  ``log_url`` is ``null`` in the response if :ref:`logs_dir` is disabled or the file doesn't exist.
       -  ``items_url`` is ``null`` in the response if :ref:`items_dir` is disabled or the file doesn't exist.
