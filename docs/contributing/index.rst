@@ -34,6 +34,14 @@ To run integration tests:
    scrapyd &
    pytest integration_tests
 
+``integration_tests/test_params.py`` is self-contained: it starts (and restarts)
+its own Scrapyd instances in temporary directories, so it does not need the
+``scrapyd`` service above, and it can be run on its own:
+
+.. code-block:: shell
+
+   pytest integration_tests/test_params.py
+
 Installation
 ------------
 
