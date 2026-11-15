@@ -16,6 +16,12 @@ Changed
 
 - Clarify error message when the launcher fails to spawn processes.
 
+Fixed
+~~~~~
+
+- A job that was dequeued but whose crawl process had not started yet is now reported as pending by the :ref:`status.json`, :ref:`listjobs.json` and :ref:`daemonstatus.json` webservices, and is cancelled by the :ref:`cancel.json` webservice. Previously, such a job was absent from every list, a cancellation reported that there was nothing to cancel, and the job then started and crawled anyway.
+- The :ref:`cancel.json` webservice no longer fails when the job's crawl process ends between the lookup and the signal.
+
 Removed
 ~~~~~~~
 

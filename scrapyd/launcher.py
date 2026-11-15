@@ -56,6 +56,15 @@ class Launcher(Service):
 
     def _spawn_process(self, message, slot):
         project = message["_project"]
+        poller = self.app.getComponent(IPoller)
+        take_launched = getattr(poller, "take_launched", None)
+
+        # A cancellation that arrived after the message was dequeued but before a slot was free must win: the
+        # cancellation reported the job as pending, so starting it now would crawl despite the successful response.
+        if take_launched is not None and take_launched(project, message.get("_job")):
+            self._get_message(slot)
+            return
+
         environment = self.app.getComponent(IEnvironment)
         message.setdefault("settings", {})
         message["settings"].update(environment.get_settings(message))
@@ -66,16 +75,23 @@ class Launcher(Service):
         process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
         process.deferred.addBoth(self._process_finished, slot)
 
+        # Register the process before spawning it. A process can exit (and its Deferred fire) before spawnProcess
+        # returns: Twisted reaps a child that already exited synchronously, so _process_finished would otherwise find
+        # no entry for the slot.
+        self.processes[slot] = process
+
         try:
             reactor.spawnProcess(process, sys.executable, args=args, env=env)
         except OSError as e:
+            self.processes.pop(slot, None)
             raise LauncherError(f"{e}: args={args!r}") from e
 
-        self.processes[slot] = process
         log.debug("Process slot {slot} occupied", slot=slot)
 
     def _process_finished(self, _, slot):
-        process = self.processes.pop(slot)
+        process = self.processes.pop(slot, None)
+        if process is None:  # the process was already handled (for example, it failed to spawn)
+            return
         process.end_time = datetime.datetime.now()
         self.finished.add(process)
         log.debug("Process slot {slot} vacated", slot=slot)

@@ -8,6 +8,7 @@ import sys
 from unittest.mock import MagicMock, PropertyMock, call
 
 import pytest
+from twisted.internet.error import ProcessExitedAlready
 from twisted.logger import LogLevel, capturedLogs
 from twisted.web import error
 
@@ -705,6 +706,92 @@ def test_cancel(txrequest, root, scrapy_process, args):
 def test_cancel_nonexistent(txrequest, root):
     args = {b"project": [b"nonexistent"], b"job": [b"aaa"]}
     assert_error(txrequest, root, "POST", "cancel", args, b"project 'nonexistent' not found")
+
+
+def test_cancel_launching(txrequest, root):
+    """A job that left its spider queue but did not start its process is cancellable, like a pending job."""
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+
+    queue = root.poller.queues["p1"]
+    queue.add("s1", _job="j1")
+    # The poller popped the job, but no launcher slot received it yet.
+    root.poller.launching[("p1", "j1")] = {"name": "s1", "_job": "j1"}
+    # Simulate the message having been delivered to the "waiting" backlog without being taken.
+    root.poller.cancelled = set()
+
+    args = {b"project": [b"p1"], b"job": [b"j1"]}
+    expected = {"prevstate": "pending"}
+    assert_content(txrequest, root, "POST", "cancel", args, expected)
+
+    # The job is gone from every list, and a second cancellation is a no-op.
+    assert root.poller.launching == {}
+    assert_content(txrequest, root, "POST", "cancel", args, {"prevstate": None})
+    assert_content(txrequest, root, "GET", "status", {b"job": [b"j1"]}, {"currstate": None})
+
+
+def test_status_and_list_jobs_report_launching_jobs_as_pending(txrequest, root):
+    """A job that left its queue but did not start is reported as pending, instead of being absent."""
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+
+    root.poller.launching[("p1", "j1")] = {"name": "s1", "_job": "j1", "settings": {}, "arg1": "val1"}
+
+    assert_content(txrequest, root, "GET", "status", {b"job": [b"j1"]}, {"currstate": "pending"})
+    assert_content(txrequest, root, "GET", "daemonstatus", {}, {"pending": 1, "running": 0, "finished": 0})
+    assert_content(
+        txrequest,
+        root,
+        "GET",
+        "listjobs",
+        {},
+        {
+            "pending": [
+                {
+                    "id": "j1",
+                    "project": "p1",
+                    "spider": "s1",
+                    "version": None,
+                    "settings": {},
+                    "args": {"arg1": "val1"},
+                }
+            ],
+            "running": [],
+            "finished": [],
+        },
+    )
+
+    # Once a launcher slot takes the job, it stops being reported as pending (and becomes running).
+    assert root.poller.take_launched("p1", "j1") is False
+    assert_content(txrequest, root, "GET", "status", {b"job": [b"j1"]}, {"currstate": None})
+    assert_content(txrequest, root, "GET", "daemonstatus", {}, {"pending": 0, "running": 0, "finished": 0})
+
+
+def test_cancel_process_exited_already(txrequest, root, scrapy_process):
+    """A cancel that finds a process which already ended is a no-op success that reports the state listjobs shows."""
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+    scrapy_process.transport.signalProcess.side_effect = ProcessExitedAlready()
+    root.launcher.processes[0] = scrapy_process
+
+    args = {b"project": [b"p1"], b"job": [b"j1"]}
+    assert_content(txrequest, root, "POST", "cancel", args, {"prevstate": "running"})
+    assert_content(txrequest, root, "GET", "status", {b"job": [b"j1"]}, {"currstate": "running"})
+
+
+def test_cancel_process_exited_already_after_dequeue(txrequest, root):
+    """A cancel that loses the race to a process that ended, before the job was ever recorded as running."""
+    root_add_version(root, "p1", "r1", "mybot")
+    root.update_projects()
+
+    queue = root.poller.queues["p1"]
+    queue.add("s1", _job="j2")
+    root.poller.launching[("p1", "j2")] = {"name": "s1", "_job": "j2"}
+
+    args = {b"project": [b"p1"], b"job": [b"j2"]}
+    # The cancellation finds the job in flight, so it reports pending.
+    assert_content(txrequest, root, "POST", "cancel", args, {"prevstate": "pending"})
+    assert_content(txrequest, root, "POST", "cancel", args, {"prevstate": None})
 
 
 # ListSpiders, Schedule, Cancel, Status and ListJobs return "project '%b' not found" on directory traversal attempts.

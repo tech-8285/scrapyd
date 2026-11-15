@@ -153,8 +153,12 @@ cancel.json
 
 Cancel a job.
 
--  If the job is pending, it is removed from the project's spider queue.
+-  If the job is pending, it is removed from the project's spider queue, and it never starts.
 -  If the job is running, the process is sent a signal to terminate.
+
+A job that was removed from the spider queue but whose process has not started yet is treated as pending: it is reported as pending by the :ref:`status.json`, :ref:`listjobs.json` and :ref:`daemonstatus.json` webservices, and its ``prevstate`` is ``pending``. This closes the window in which a job was neither reported nor cancellable while it was being dequeued.
+
+If the process ends before the signal is sent, the request still succeeds, and ``prevstate`` is ``running`` (which is what :ref:`listjobs.json` reports until the job is recorded as finished).
 
 Supported request methods
   ``POST``
@@ -248,7 +252,7 @@ listjobs.json
 
 Get the pending, running and finished jobs of a project.
 
--  Pending jobs are in :ref:`spider queues<spiderqueue>`.
+-  Pending jobs are in :ref:`spider queues<spiderqueue>`, or were dequeued and are waiting for their process to start.
 -  Running jobs have Scrapy processes.
 -  Finished jobs are in :ref:job storage<jobstorage>`.
 

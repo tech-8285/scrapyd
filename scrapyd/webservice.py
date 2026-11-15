@@ -8,10 +8,12 @@ import traceback
 import uuid
 import zipfile
 from collections import defaultdict
+from contextlib import suppress
 from io import BytesIO
 from subprocess import PIPE, Popen
 from typing import ClassVar
 
+from twisted.internet import error as inet_error
 from twisted.logger import Logger
 from twisted.web import error, http, resource
 
@@ -57,6 +59,16 @@ def param(
         return wrapper
 
     return decorator
+
+
+def launching(root, project=None):
+    """
+    Return the ``(project, message)`` pairs of jobs that left a spider queue but did not start a process yet.
+
+    Custom :ref:`poller<poller>` implementations needn't track this window, so the method is optional.
+    """
+    launching_messages = getattr(root.poller, "launching_messages", None)
+    return [] if launching_messages is None else launching_messages(project)
 
 
 class SpiderList:
@@ -175,7 +187,7 @@ class DaemonStatus(WsResource):
 
     def render_GET(self, txrequest):
         return {
-            "pending": sum(queue.count() for queue in self.root.poller.queues.values()),
+            "pending": sum(queue.count() for queue in self.root.poller.queues.values()) + len(launching(self.root)),
             "running": len(self.root.launcher.processes),
             "finished": len(self.root.launcher.finished),
         }
@@ -250,12 +262,22 @@ class Cancel(WsResource):
         if self.root.poller.queues[project].remove(lambda message: message["_job"] == job):
             prevstate = "pending"
 
+        # A job that left the spider queue but did not start its process yet is neither pending nor running. Without
+        # this, the cancellation reports that there is nothing to cancel, and the job starts and crawls afterwards.
+        cancel_launching = getattr(self.root.poller, "cancel_launching", None)
+        if cancel_launching is not None and cancel_launching(project, job):
+            prevstate = "pending"
+
         if signal.isdigit():
             signal = int(signal)
 
         for process in self.root.launcher.processes.values():
             if process.project == project and process.job == job:
-                process.transport.signalProcess(signal)
+                # The process can end between the lookup and the signal. The job is still recorded as running until
+                # the launcher's finishing callback runs, so report it as running either way: a cancellation that
+                # finds the job running must not contradict listjobs, and must not fail because it lost that race.
+                with suppress(inet_error.ProcessExitedAlready):
+                    process.transport.signalProcess(signal)
                 prevstate = "running"
 
         log.debug(
@@ -344,6 +366,13 @@ class Status(WsResource):
                     result["currstate"] = "pending"
                     return result
 
+        # A job that left its spider queue but did not start a process yet is not absent: it will start unless it is
+        # cancelled, so report it like a job that is still in the queue.
+        for _project, message in launching(self.root, project):
+            if message.get("_job") == job:
+                result["currstate"] = "pending"
+                return result
+
         return result
 
 
@@ -379,6 +408,19 @@ class ListJobs(WsResource):
                 }
                 for queue_name in (queues if project is None else [project])
                 for message in queues[queue_name].list()
+            ]
+            # Jobs that left their spider queue but did not start a process yet: they are reported as pending, so
+            # that no scheduled job is absent from every list.
+            + [
+                {
+                    "id": message["_job"],
+                    "project": launched_project,
+                    "spider": message["name"],
+                    "version": message.get("_version"),
+                    "settings": message.get("settings", {}),
+                    "args": {k: v for k, v in message.items() if k not in ("name", "_job", "_version", "settings")},
+                }
+                for launched_project, message in launching(self.root, project)
             ],
             "running": [
                 {

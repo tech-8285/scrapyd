@@ -34,6 +34,8 @@ To run integration tests:
    scrapyd &
    pytest integration_tests
 
+The tests in ``integration_tests/test_cancel_race.py`` start their own Scrapyd server, with a local project, in a temporary directory, so they don't need the server above.
+
 Installation
 ------------
 

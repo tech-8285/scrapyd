@@ -2,12 +2,13 @@ import datetime
 import re
 
 import pytest
-from twisted.internet import defer, error
+from twisted.internet import defer, error, reactor
 from twisted.logger import LogLevel, capturedLogs
 from twisted.python import failure
 
 from scrapyd import __version__
 from scrapyd.config import Config
+from scrapyd.interfaces import IPoller
 from scrapyd.launcher import Launcher, get_crawl_args
 from tests import get_message, has_settings
 
@@ -192,3 +193,80 @@ def test_process_ended_terminated(environ, process):
 
 def test_repr(process):
     assert repr(process).startswith(f"ScrapyProcessProtocol(project=p1 spider=s1 job=j1 pid={process.pid} start_time=")
+
+
+def test_spawn_process_that_ends_before_spawn_returns(launcher, monkeypatch):
+    """Twisted reaps a child that exits synchronously, so the finishing callback can run before spawnProcess returns."""
+
+    def spawn_process_and_exit_immediately(process_protocol, executable, args=(), env=None, **kwargs):
+        # The child already exited when Twisted reaped it, so processEnded is called before spawnProcess returns.
+        process_protocol.makeConnection(_FakeTransport())
+        process_protocol.processEnded(failure.Failure(error.ProcessDone(0)))
+
+    monkeypatch.setattr(reactor, "spawnProcess", spawn_process_and_exit_immediately)
+
+    launcher._spawn_process({"_project": "p1", "_spider": "s1", "_job": "j1"}, 0)  # noqa: SLF001
+
+    # The job is not lost (it is recorded as finished), and its slot is free for the next job.
+    assert 0 not in launcher.processes
+    assert [job.job for job in launcher.finished.list()] == ["j1"]
+    assert launcher.finished.list()[0].end_time is not None
+
+
+class _FakeTransport:
+    pid = 12345
+
+
+def test_spawn_process_that_already_ended_does_not_raise(launcher, monkeypatch):
+    """The finishing callback must tolerate a slot that was already handled, instead of raising KeyError."""
+    launcher._process_finished(None, 5)  # noqa: SLF001
+
+    assert launcher.processes == {}
+
+
+def make_cancelling_launcher(app, cancelled_job):
+    """Return a launcher whose poller reports ``cancelled_job`` as cancelled when the launcher takes it."""
+
+    class CancellablePoller:
+        def __init__(self):
+            self.taken = []
+
+        def take_launched(self, project, job):
+            self.taken.append((project, job))
+            return job == cancelled_job
+
+        def next(self):
+            return defer.Deferred()
+
+    poller = CancellablePoller()
+    original = app.getComponent
+    app.getComponent = lambda interface: poller if interface is IPoller else original(interface)
+    return Launcher(Config(), app), poller
+
+
+def test_spawn_process_honors_a_cancellation_that_arrived_before_the_slot_was_free(app, monkeypatch):
+    launcher, poller = make_cancelling_launcher(app, cancelled_job="j1")
+
+    spawned = []
+    monkeypatch.setattr(reactor, "spawnProcess", lambda *args, **kwargs: spawned.append(args))
+
+    launcher._spawn_process({"_project": "p1", "_spider": "s1", "_job": "j1"}, 0)  # noqa: SLF001
+
+    # The cancellation was reported to the launcher, which never starts the cancelled job.
+    assert poller.taken == [("p1", "j1")]
+    assert spawned == []
+    assert launcher.processes == {}
+    assert launcher.finished.list() == []
+
+
+def test_spawn_process_starts_a_job_that_was_not_cancelled(app, monkeypatch):
+    launcher, poller = make_cancelling_launcher(app, cancelled_job=None)
+
+    spawned = []
+    monkeypatch.setattr(reactor, "spawnProcess", lambda *args, **kwargs: spawned.append(args))
+
+    launcher._spawn_process({"_project": "p1", "_spider": "s1", "_job": "j1"}, 0)  # noqa: SLF001
+
+    assert poller.taken == [("p1", "j1")]
+    assert len(spawned) == 1
+    assert 0 in launcher.processes
