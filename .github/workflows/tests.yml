@@ -20,8 +20,8 @@ jobs:
       # Occasional "ConnectionRefusedError: [Errno 111] Connection refused".
       - name: Run integration tests
         run: |
-          printf "[scrapyd]\nusername = hello12345\npassword = 67890world\n" > scrapyd.conf
-          mkdir logs
+          printf "[scrapyd]\nusername = hello12345\npassword = 67890world\nitems_dir = items\n" > scrapyd.conf
+          mkdir logs items
           scrapyd > scrapyd.log 2>&1 &
           sleep 1
           pytest -W error -W ignore::ResourceWarning -W ignore::DeprecationWarning:pytest_twisted integration_tests
